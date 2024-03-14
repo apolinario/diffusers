@@ -453,8 +453,6 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
                     callback_kwargs[k] = locals()[k]
 
                 callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-                preview_output = callback_outputs.pop("preview_output", preview_output)
-                yield callback_outputs
                 latents = callback_outputs.pop("latents", latents)
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
                 negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
@@ -481,4 +479,4 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
 
         if not return_dict:
             return images
-        yield ImagePipelineOutput(images)
+        return ImagePipelineOutput(images)
