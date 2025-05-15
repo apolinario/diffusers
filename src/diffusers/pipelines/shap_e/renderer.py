@@ -844,7 +844,7 @@ class ShapERenderer(ModelMixin, ConfigMixin):
         transmittance(t[i + 1]) := transmittance(t[i]). 4) The last term is integration to infinity (e.g. [t[-1],
         math.inf]) that is evaluated by the void_model (i.e. we consider this space to be empty).
 
-        args:
+        Args:
             rays: [batch_size x ... x 2 x 3] origin and direction. sampler: disjoint volume integrals. n_samples:
             number of ts to sample. prev_model_outputs: model outputs from the previous rendering step, including
 
@@ -983,9 +983,9 @@ class ShapERenderer(ModelMixin, ConfigMixin):
         fields = torch.cat(fields, dim=1)
         fields = fields.float()
 
-        assert (
-            len(fields.shape) == 3 and fields.shape[-1] == 1
-        ), f"expected [meta_batch x inner_batch] SDF results, but got {fields.shape}"
+        assert len(fields.shape) == 3 and fields.shape[-1] == 1, (
+            f"expected [meta_batch x inner_batch] SDF results, but got {fields.shape}"
+        )
 
         fields = fields.reshape(1, *([grid_size] * 3))
 
@@ -1038,10 +1038,10 @@ class ShapERenderer(ModelMixin, ConfigMixin):
         textures = _convert_srgb_to_linear(textures)
         textures = textures.float()
 
-        # 3.3 augument the mesh with texture data
-        assert len(textures.shape) == 3 and textures.shape[-1] == len(
-            texture_channels
-        ), f"expected [meta_batch x inner_batch x texture_channels] field results, but got {textures.shape}"
+        # 3.3 augment the mesh with texture data
+        assert len(textures.shape) == 3 and textures.shape[-1] == len(texture_channels), (
+            f"expected [meta_batch x inner_batch x texture_channels] field results, but got {textures.shape}"
+        )
 
         for m, texture in zip(raw_meshes, textures):
             texture = texture[: len(m.verts)]

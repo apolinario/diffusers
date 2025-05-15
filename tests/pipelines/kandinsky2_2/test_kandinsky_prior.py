@@ -186,6 +186,8 @@ class KandinskyV22PriorPipelineFastTests(PipelineTesterMixin, unittest.TestCase)
     callback_cfg_params = ["prompt_embeds", "text_encoder_hidden_states", "text_mask"]
     test_xformers_attention = False
 
+    supports_dduf = False
+
     def get_dummy_components(self):
         dummies = Dummies()
         return dummies.get_dummy_components()
@@ -213,12 +215,13 @@ class KandinskyV22PriorPipelineFastTests(PipelineTesterMixin, unittest.TestCase)
         )[0]
 
         image_slice = image[0, -10:]
+
         image_from_tuple_slice = image_from_tuple[0, -10:]
 
         assert image.shape == (1, 32)
 
         expected_slice = np.array(
-            [-0.0532, 1.7120, 0.3656, -1.0852, -0.8946, -1.1756, 0.4348, 0.2482, 0.5146, -0.1156]
+            [-0.5948, 0.1875, -0.1523, -1.1995, -1.4061, -0.6367, -1.4607, -0.6406, 0.8793, -0.3891]
         )
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2

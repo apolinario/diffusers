@@ -23,12 +23,13 @@ To create the package for PyPI.
    If releasing on a special branch, copy the updated README.md on the main branch for the commit you will make
    for the post-release and run `make fix-copies` on the main branch as well.
 
-2. Run Tests for Amazon Sagemaker. The documentation is located in `./tests/sagemaker/README.md`, otherwise @philschmid.
+2. Unpin specific versions from setup.py that use a git install.
 
-3. Unpin specific versions from setup.py that use a git install.
-
-4. Checkout the release branch (v<RELEASE>-release, for example v4.19-release), and commit these changes with the
+3. Checkout the release branch (v<RELEASE>-release, for example v4.19-release), and commit these changes with the
    message: "Release: <RELEASE>" and push.
+
+4. Manually trigger the "Nightly and release tests on main/release branch" workflow from the release branch. Wait for
+   the tests to complete. We can safely ignore the known test failures.
 
 5. Wait for the tests on main to be completed and be green (otherwise revert and fix bugs).
 
@@ -72,7 +73,12 @@ To create the package for PyPI.
 9. Upload the final version to the actual PyPI:
    twine upload dist/* -r pypi
 
-10. Prepare the release notes and publish them on GitHub once everything is looking hunky-dory.
+10. Prepare the release notes and publish them on GitHub once everything is looking hunky-dory. You can use the following
+    Space to fetch all the commits applicable for the release: https://huggingface.co/spaces/sayakpaul/auto-release-notes-diffusers.
+    It automatically fetches the correct tag and branch but also provides the option to configure them.
+    `tag` should be the previous release tag (v0.26.1, for example), and `branch` should be
+    the latest release branch (v0.27.0-release, for example). It denotes all commits that have happened on branch
+    v0.27.0-release after the tag v0.26.1 was created.
 
 11. Run `make post-release` (or, for a patch release, `make post-patch`). If you were on a branch for the release,
     you need to go back to main before executing this.
@@ -81,9 +87,8 @@ To create the package for PyPI.
 import os
 import re
 import sys
-from distutils.core import Command
 
-from setuptools import find_packages, setup
+from setuptools import Command, find_packages, setup
 
 
 # IMPORTANT:
@@ -91,13 +96,13 @@ from setuptools import find_packages, setup
 # 2. once modified, run: `make deps_table_update` to update src/diffusers/dependency_versions_table.py
 _deps = [
     "Pillow",  # keep the PIL.Image.Resampling deprecation away
-    "accelerate>=0.11.0",
+    "accelerate>=0.31.0",
     "compel==0.1.8",
     "datasets",
     "filelock",
     "flax>=0.4.1",
     "hf-doc-builder>=0.3.0",
-    "huggingface-hub>=0.20.2",
+    "huggingface-hub>=0.27.0",
     "requests-mock==1.10.0",
     "importlib_metadata",
     "invisible-watermark>=0.2.0",
@@ -111,25 +116,33 @@ _deps = [
     "librosa",
     "numpy",
     "parameterized",
-    "peft>=0.6.0",
+    "peft>=0.15.0",
     "protobuf>=3.20.3,<4",
     "pytest",
     "pytest-timeout",
     "pytest-xdist",
     "python>=3.8.0",
-    "ruff==0.1.5",
+    "ruff==0.9.10",
     "safetensors>=0.3.1",
     "sentencepiece>=0.1.91,!=0.1.92",
     "GitPython<3.1.19",
     "scipy",
     "onnx",
+    "optimum_quanto>=0.2.6",
+    "gguf>=0.10.0",
+    "torchao>=0.7.0",
+    "bitsandbytes>=0.43.3",
     "regex!=2019.12.17",
     "requests",
     "tensorboard",
+    "tiktoken>=0.7.0",
     "torch>=1.4",
     "torchvision",
-    "transformers>=4.25.1",
+    "transformers>=4.41.2",
     "urllib3<=2.0.0",
+    "black",
+    "phonemizer",
+    "opencv-python",
 ]
 
 # this is a lookup table with items like:
@@ -163,7 +176,7 @@ def deps_list(*pkgs):
 
 class DepsTableUpdateCommand(Command):
     """
-    A custom distutils command that updates the dependency table.
+    A custom command that updates the dependency table.
     usage: python setup.py deps_table_update
     """
 
@@ -220,10 +233,17 @@ extras["test"] = deps_list(
     "safetensors",
     "sentencepiece",
     "scipy",
+    "tiktoken",
     "torchvision",
     "transformers",
+    "phonemizer",
 )
 extras["torch"] = deps_list("torch", "accelerate")
+
+extras["bitsandbytes"] = deps_list("bitsandbytes", "accelerate")
+extras["gguf"] = deps_list("gguf", "accelerate")
+extras["optimum_quanto"] = deps_list("optimum_quanto", "accelerate")
+extras["torchao"] = deps_list("torchao", "accelerate")
 
 if os.name == "nt":  # windows
     extras["flax"] = []  # jax is not supported on windows
@@ -249,14 +269,14 @@ version_range_max = max(sys.version_info[1], 10) + 1
 
 setup(
     name="diffusers",
-    version="0.27.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
+    version="0.34.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="State-of-the-art diffusion in PyTorch and JAX.",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     keywords="deep learning diffusion jax pytorch stable diffusion audioldm",
     license="Apache 2.0 License",
     author="The Hugging Face team (past and future) with the help of all our contributors (https://github.com/huggingface/diffusers/graphs/contributors)",
-    author_email="patrick@huggingface.co",
+    author_email="diffusers@huggingface.co",
     url="https://github.com/huggingface/diffusers",
     package_dir={"": "src"},
     packages=find_packages("src"),

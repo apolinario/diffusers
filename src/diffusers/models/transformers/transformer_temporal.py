@@ -31,11 +31,11 @@ class TransformerTemporalModelOutput(BaseOutput):
     The output of [`TransformerTemporalModel`].
 
     Args:
-        sample (`torch.FloatTensor` of shape `(batch_size x num_frames, num_channels, height, width)`):
+        sample (`torch.Tensor` of shape `(batch_size x num_frames, num_channels, height, width)`):
             The hidden states output conditioned on `encoder_hidden_states` input.
     """
 
-    sample: torch.FloatTensor
+    sample: torch.Tensor
 
 
 class TransformerTemporalModel(ModelMixin, ConfigMixin):
@@ -66,6 +66,8 @@ class TransformerTemporalModel(ModelMixin, ConfigMixin):
         num_positional_embeddings: (`int`, *optional*):
             The maximum length of the sequence over which to apply positional embeddings.
     """
+
+    _skip_layerwise_casting_patterns = ["norm"]
 
     @register_to_config
     def __init__(
@@ -120,7 +122,7 @@ class TransformerTemporalModel(ModelMixin, ConfigMixin):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
+        hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.LongTensor] = None,
         timestep: Optional[torch.LongTensor] = None,
         class_labels: torch.LongTensor = None,
@@ -132,7 +134,7 @@ class TransformerTemporalModel(ModelMixin, ConfigMixin):
         The [`TransformerTemporal`] forward method.
 
         Args:
-            hidden_states (`torch.LongTensor` of shape `(batch size, num latent pixels)` if discrete, `torch.FloatTensor` of shape `(batch size, channel, height, width)` if continuous):
+            hidden_states (`torch.LongTensor` of shape `(batch size, num latent pixels)` if discrete, `torch.Tensor` of shape `(batch size, channel, height, width)` if continuous):
                 Input hidden_states.
             encoder_hidden_states ( `torch.LongTensor` of shape `(batch size, encoder_hidden_states dim)`, *optional*):
                 Conditional embeddings for cross attention layer. If not given, cross-attention defaults to
@@ -149,13 +151,14 @@ class TransformerTemporalModel(ModelMixin, ConfigMixin):
                 `self.processor` in
                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] instead of a plain
-                tuple.
+                Whether or not to return a [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`]
+                instead of a plain tuple.
 
         Returns:
-            [`~models.transformer_temporal.TransformerTemporalModelOutput`] or `tuple`:
-                If `return_dict` is True, an [`~models.transformer_temporal.TransformerTemporalModelOutput`] is
-                returned, otherwise a `tuple` where the first element is the sample tensor.
+            [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`] or `tuple`:
+                If `return_dict` is True, an
+                [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`] is returned, otherwise a
+                `tuple` where the first element is the sample tensor.
         """
         # 1. Input
         batch_frames, channel, height, width = hidden_states.shape
@@ -283,7 +286,7 @@ class TransformerSpatioTemporalModel(nn.Module):
     ):
         """
         Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch size, channel, height, width)`):
+            hidden_states (`torch.Tensor` of shape `(batch size, channel, height, width)`):
                 Input hidden_states.
             num_frames (`int`):
                 The number of frames to be processed per batch. This is used to reshape the hidden states.
@@ -294,13 +297,14 @@ class TransformerSpatioTemporalModel(nn.Module):
                 A tensor indicating whether the input contains only images. 1 indicates that the input contains only
                 images, 0 indicates that the input contains video frames.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~models.transformer_temporal.TransformerTemporalModelOutput`] instead of a plain
-                tuple.
+                Whether or not to return a [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`]
+                instead of a plain tuple.
 
         Returns:
-            [`~models.transformer_temporal.TransformerTemporalModelOutput`] or `tuple`:
-                If `return_dict` is True, an [`~models.transformer_temporal.TransformerTemporalModelOutput`] is
-                returned, otherwise a `tuple` where the first element is the sample tensor.
+            [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`] or `tuple`:
+                If `return_dict` is True, an
+                [`~models.transformers.transformer_temporal.TransformerTemporalModelOutput`] is returned, otherwise a
+                `tuple` where the first element is the sample tensor.
         """
         # 1. Input
         batch_frames, _, height, width = hidden_states.shape
@@ -311,10 +315,10 @@ class TransformerSpatioTemporalModel(nn.Module):
         time_context_first_timestep = time_context[None, :].reshape(
             batch_size, num_frames, -1, time_context.shape[-1]
         )[:, 0]
-        time_context = time_context_first_timestep[None, :].broadcast_to(
-            height * width, batch_size, 1, time_context.shape[-1]
+        time_context = time_context_first_timestep[:, None].broadcast_to(
+            batch_size, height * width, time_context.shape[-2], time_context.shape[-1]
         )
-        time_context = time_context.reshape(height * width * batch_size, 1, time_context.shape[-1])
+        time_context = time_context.reshape(batch_size * height * width, -1, time_context.shape[-1])
 
         residual = hidden_states
 
@@ -338,20 +342,12 @@ class TransformerSpatioTemporalModel(nn.Module):
 
         # 2. Blocks
         for block, temporal_block in zip(self.transformer_blocks, self.temporal_transformer_blocks):
-            if self.training and self.gradient_checkpointing:
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    block,
-                    hidden_states,
-                    None,
-                    encoder_hidden_states,
-                    None,
-                    use_reentrant=False,
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(
+                    block, hidden_states, None, encoder_hidden_states, None
                 )
             else:
-                hidden_states = block(
-                    hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                )
+                hidden_states = block(hidden_states, encoder_hidden_states=encoder_hidden_states)
 
             hidden_states_mix = hidden_states
             hidden_states_mix = hidden_states_mix + emb

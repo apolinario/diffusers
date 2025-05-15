@@ -14,17 +14,17 @@
 
 from typing import Callable, List, Optional, Union
 
-import numpy as np
 import PIL.Image
 import torch
-from PIL import Image
 from transformers import (
     XLMRobertaTokenizer,
 )
 
+from ...image_processor import VaeImageProcessor
 from ...models import UNet2DConditionModel, VQModel
 from ...schedulers import DDIMScheduler
 from ...utils import (
+    is_torch_xla_available,
     logging,
     replace_example_docstring,
 )
@@ -33,7 +33,15 @@ from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from .text_encoder import MultilingualCLIP
 
 
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -86,15 +94,6 @@ def get_new_h_w(h, w, scale_factor=8):
     return new_h * scale_factor, new_w * scale_factor
 
 
-def prepare_image(pil_image, w=512, h=512):
-    pil_image = pil_image.resize((w, h), resample=Image.BICUBIC, reducing_gap=1)
-    arr = np.array(pil_image.convert("RGB"))
-    arr = arr.astype(np.float32) / 127.5 - 1
-    arr = np.transpose(arr, [2, 0, 1])
-    image = torch.from_numpy(arr).unsqueeze(0)
-    return image
-
-
 class KandinskyImg2ImgPipeline(DiffusionPipeline):
     """
     Pipeline for image-to-image generation using Kandinsky
@@ -134,7 +133,16 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
             scheduler=scheduler,
             movq=movq,
         )
-        self.movq_scale_factor = 2 ** (len(self.movq.config.block_out_channels) - 1)
+        self.movq_scale_factor = (
+            2 ** (len(self.movq.config.block_out_channels) - 1) if getattr(self, "movq", None) else 8
+        )
+        movq_latent_channels = self.movq.config.latent_channels if getattr(self, "movq", None) else 4
+        self.image_processor = VaeImageProcessor(
+            vae_scale_factor=self.movq_scale_factor,
+            vae_latent_channels=movq_latent_channels,
+            resample="bicubic",
+            reducing_gap=1,
+        )
 
     def get_timesteps(self, num_inference_steps, strength, device):
         # get the original timestep using init_timestep
@@ -266,10 +274,10 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
     #  add_noise method to overwrite the one in schedule because it use a different beta schedule for adding noise vs sampling
     def add_noise(
         self,
-        original_samples: torch.FloatTensor,
-        noise: torch.FloatTensor,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
         timesteps: torch.IntTensor,
-    ) -> torch.FloatTensor:
+    ) -> torch.Tensor:
         betas = torch.linspace(0.0001, 0.02, 1000, dtype=torch.float32)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -295,9 +303,9 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
     def __call__(
         self,
         prompt: Union[str, List[str]],
-        image: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]],
-        image_embeds: torch.FloatTensor,
-        negative_image_embeds: torch.FloatTensor,
+        image: Union[torch.Tensor, PIL.Image.Image, List[torch.Tensor], List[PIL.Image.Image]],
+        image_embeds: torch.Tensor,
+        negative_image_embeds: torch.Tensor,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         height: int = 512,
         width: int = 512,
@@ -307,7 +315,7 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
         num_images_per_prompt: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         output_type: Optional[str] = "pil",
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
         return_dict: bool = True,
     ):
@@ -317,12 +325,12 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
         Args:
             prompt (`str` or `List[str]`):
                 The prompt or prompts to guide the image generation.
-            image (`torch.FloatTensor`, `PIL.Image.Image`):
+            image (`torch.Tensor`, `PIL.Image.Image`):
                 `Image`, or tensor representing an image batch, that will be used as the starting point for the
                 process.
-            image_embeds (`torch.FloatTensor` or `List[torch.FloatTensor]`):
+            image_embeds (`torch.Tensor` or `List[torch.Tensor]`):
                 The clip image embeddings for text prompt, that will be used to condition the image generation.
-            negative_image_embeds (`torch.FloatTensor` or `List[torch.FloatTensor]`):
+            negative_image_embeds (`torch.Tensor` or `List[torch.Tensor]`):
                 The clip image embeddings for negative text prompt, will be used to condition the image generation.
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
@@ -356,7 +364,7 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
                 (`np.array`) or `"pt"` (`torch.Tensor`).
             callback (`Callable`, *optional*):
                 A function that calls every `callback_steps` steps during inference. The function is called with the
-                following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function is called. If not specified, the callback is called at
                 every step.
@@ -408,7 +416,7 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
                 f"Input is in incorrect format: {[type(i) for i in image]}. Currently, we only support  PIL image and pytorch tensor"
             )
 
-        image = torch.cat([prepare_image(i, width, height) for i in image], dim=0)
+        image = torch.cat([self.image_processor.preprocess(i, width, height) for i in image], dim=0)
         image = image.to(dtype=prompt_embeds.dtype, device=device)
 
         latents = self.movq.encode(image)["latents"]
@@ -478,6 +486,9 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
                 step_idx = i // getattr(self.scheduler, "order", 1)
                 callback(step_idx, t, latents)
 
+            if XLA_AVAILABLE:
+                xm.mark_step()
+
         # 7. post-processing
         image = self.movq.decode(latents, force_not_quantize=True)["sample"]
 
@@ -486,13 +497,7 @@ class KandinskyImg2ImgPipeline(DiffusionPipeline):
         if output_type not in ["pt", "np", "pil"]:
             raise ValueError(f"Only the output types `pt`, `pil` and `np` are supported not output_type={output_type}")
 
-        if output_type in ["np", "pil"]:
-            image = image * 0.5 + 0.5
-            image = image.clamp(0, 1)
-            image = image.cpu().permute(0, 2, 3, 1).float().numpy()
-
-        if output_type == "pil":
-            image = self.numpy_to_pil(image)
+        image = self.image_processor.postprocess(image, output_type)
 
         if not return_dict:
             return (image,)

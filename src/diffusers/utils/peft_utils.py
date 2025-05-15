@@ -14,6 +14,7 @@
 """
 PEFT utilities: Utilities related to peft library
 """
+
 import collections
 import importlib
 from typing import Optional
@@ -63,9 +64,11 @@ def recurse_remove_peft_layers(model):
             module_replaced = False
 
             if isinstance(module, LoraLayer) and isinstance(module, torch.nn.Linear):
-                new_module = torch.nn.Linear(module.in_features, module.out_features, bias=module.bias is not None).to(
-                    module.weight.device
-                )
+                new_module = torch.nn.Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                ).to(module.weight.device)
                 new_module.weight = module.weight
                 if module.bias is not None:
                     new_module.bias = module.bias
@@ -109,6 +112,9 @@ def scale_lora_layers(model, weight):
     """
     from peft.tuners.tuners_utils import BaseTunerLayer
 
+    if weight == 1.0:
+        return
+
     for module in model.modules():
         if isinstance(module, BaseTunerLayer):
             module.scale_layer(weight)
@@ -128,11 +134,14 @@ def unscale_lora_layers(model, weight: Optional[float] = None):
     """
     from peft.tuners.tuners_utils import BaseTunerLayer
 
+    if weight is None or weight == 1.0:
+        return
+
     for module in model.modules():
         if isinstance(module, BaseTunerLayer):
-            if weight is not None and weight != 0:
+            if weight != 0:
                 module.unscale_layer(weight)
-            elif weight is not None and weight == 0:
+            else:
                 for adapter_name in module.active_adapters:
                     # if weight == 0 unscale should re-set the scale to the original value.
                     module.set_scale(adapter_name, 1.0)
@@ -144,19 +153,19 @@ def get_peft_kwargs(rank_dict, network_alpha_dict, peft_state_dict, is_unet=True
     r = lora_alpha = list(rank_dict.values())[0]
 
     if len(set(rank_dict.values())) > 1:
-        # get the rank occuring the most number of times
+        # get the rank occurring the most number of times
         r = collections.Counter(rank_dict.values()).most_common()[0][0]
 
-        # for modules with rank different from the most occuring rank, add it to the `rank_pattern`
+        # for modules with rank different from the most occurring rank, add it to the `rank_pattern`
         rank_pattern = dict(filter(lambda x: x[1] != r, rank_dict.items()))
         rank_pattern = {k.split(".lora_B.")[0]: v for k, v in rank_pattern.items()}
 
     if network_alpha_dict is not None and len(network_alpha_dict) > 0:
         if len(set(network_alpha_dict.values())) > 1:
-            # get the alpha occuring the most number of times
+            # get the alpha occurring the most number of times
             lora_alpha = collections.Counter(network_alpha_dict.values()).most_common()[0][0]
 
-            # for modules with alpha different from the most occuring alpha, add it to the `alpha_pattern`
+            # for modules with alpha different from the most occurring alpha, add it to the `alpha_pattern`
             alpha_pattern = dict(filter(lambda x: x[1] != lora_alpha, network_alpha_dict.items()))
             if is_unet:
                 alpha_pattern = {
@@ -170,6 +179,9 @@ def get_peft_kwargs(rank_dict, network_alpha_dict, peft_state_dict, is_unet=True
 
     # layer names without the Diffusers specific
     target_modules = list({name.split(".lora")[0] for name in peft_state_dict.keys()})
+    use_dora = any("lora_magnitude_vector" in k for k in peft_state_dict)
+    # for now we know that the "bias" keys are only associated with `lora_B`.
+    lora_bias = any("lora_B" in k and k.endswith(".bias") for k in peft_state_dict)
 
     lora_config_kwargs = {
         "r": r,
@@ -177,6 +189,8 @@ def get_peft_kwargs(rank_dict, network_alpha_dict, peft_state_dict, is_unet=True
         "rank_pattern": rank_pattern,
         "alpha_pattern": alpha_pattern,
         "target_modules": target_modules,
+        "use_dora": use_dora,
+        "lora_bias": lora_bias,
     }
     return lora_config_kwargs
 
@@ -227,25 +241,33 @@ def delete_adapter_layers(model, adapter_name):
 def set_weights_and_activate_adapters(model, adapter_names, weights):
     from peft.tuners.tuners_utils import BaseTunerLayer
 
-    # iterate over each adapter, make it active and set the corresponding scaling weight
-    for adapter_name, weight in zip(adapter_names, weights):
-        for module in model.modules():
-            if isinstance(module, BaseTunerLayer):
-                # For backward compatbility with previous PEFT versions
-                if hasattr(module, "set_adapter"):
-                    module.set_adapter(adapter_name)
-                else:
-                    module.active_adapter = adapter_name
-                module.set_scale(adapter_name, weight)
+    def get_module_weight(weight_for_adapter, module_name):
+        if not isinstance(weight_for_adapter, dict):
+            # If weight_for_adapter is a single number, always return it.
+            return weight_for_adapter
 
-    # set multiple active adapters
-    for module in model.modules():
+        for layer_name, weight_ in weight_for_adapter.items():
+            if layer_name in module_name:
+                return weight_
+
+        parts = module_name.split(".")
+        # e.g. key = "down_blocks.1.attentions.0"
+        key = f"{parts[0]}.{parts[1]}.attentions.{parts[3]}"
+        block_weight = weight_for_adapter.get(key, 1.0)
+
+        return block_weight
+
+    for module_name, module in model.named_modules():
         if isinstance(module, BaseTunerLayer):
-            # For backward compatbility with previous PEFT versions
+            # For backward compatibility with previous PEFT versions, set multiple active adapters
             if hasattr(module, "set_adapter"):
                 module.set_adapter(adapter_names)
             else:
                 module.active_adapter = adapter_names
+
+            # Set the scaling weight for each adapter for this module
+            for adapter_name, weight in zip(adapter_names, weights):
+                module.set_scale(adapter_name, get_module_weight(weight, module_name))
 
 
 def check_peft_version(min_version: str) -> None:

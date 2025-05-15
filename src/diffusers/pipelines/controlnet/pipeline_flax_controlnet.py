@@ -23,7 +23,7 @@ from flax.core.frozen_dict import FrozenDict
 from flax.jax_utils import unreplicate
 from flax.training.common_utils import shard
 from PIL import Image
-from transformers import CLIPFeatureExtractor, CLIPTokenizer, FlaxCLIPTextModel
+from transformers import CLIPImageProcessor, CLIPTokenizer, FlaxCLIPTextModel
 
 from ...models import FlaxAutoencoderKL, FlaxControlNetModel, FlaxUNet2DConditionModel
 from ...schedulers import (
@@ -75,7 +75,10 @@ EXAMPLE_DOC_STRING = """
         ...     "lllyasviel/sd-controlnet-canny", from_pt=True, dtype=jnp.float32
         ... )
         >>> pipe, params = FlaxStableDiffusionControlNetPipeline.from_pretrained(
-        ...     "runwayml/stable-diffusion-v1-5", controlnet=controlnet, revision="flax", dtype=jnp.float32
+        ...     "stable-diffusion-v1-5/stable-diffusion-v1-5",
+        ...     controlnet=controlnet,
+        ...     revision="flax",
+        ...     dtype=jnp.float32,
         ... )
         >>> params["controlnet"] = controlnet_params
 
@@ -132,8 +135,8 @@ class FlaxStableDiffusionControlNetPipeline(FlaxDiffusionPipeline):
             [`FlaxDPMSolverMultistepScheduler`].
         safety_checker ([`FlaxStableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
-            Please refer to the [model card](https://huggingface.co/runwayml/stable-diffusion-v1-5) for more details
-            about a model's potential harms.
+            Please refer to the [model card](https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5) for
+            more details about a model's potential harms.
         feature_extractor ([`~transformers.CLIPImageProcessor`]):
             A `CLIPImageProcessor` to extract features from generated images; used as inputs to the `safety_checker`.
     """
@@ -149,7 +152,7 @@ class FlaxStableDiffusionControlNetPipeline(FlaxDiffusionPipeline):
             FlaxDDIMScheduler, FlaxPNDMScheduler, FlaxLMSDiscreteScheduler, FlaxDPMSolverMultistepScheduler
         ],
         safety_checker: FlaxStableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         dtype: jnp.dtype = jnp.float32,
     ):
         super().__init__()
@@ -175,7 +178,7 @@ class FlaxStableDiffusionControlNetPipeline(FlaxDiffusionPipeline):
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
 
     def prepare_text_inputs(self, prompt: Union[str, List[str]]):
         if not isinstance(prompt, (str, list)):

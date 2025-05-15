@@ -28,7 +28,7 @@ from diffusers import (
     PNDMScheduler,
     UNet2DConditionModel,
 )
-from diffusers.utils.testing_utils import enable_full_determinism
+from diffusers.utils.testing_utils import enable_full_determinism, torch_device
 from src.diffusers.pipelines.blip_diffusion.blip_image_processing import BlipImageProcessor
 from src.diffusers.pipelines.blip_diffusion.modeling_blip2 import Blip2QFormerModel
 from src.diffusers.pipelines.blip_diffusion.modeling_ctx_clip import ContextCLIPTextModel
@@ -67,6 +67,8 @@ class BlipDiffusionControlNetPipelineFastTests(PipelineTesterMixin, unittest.Tes
         "prompt_strength",
         "prompt_reps",
     ]
+
+    supports_dduf = False
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -196,6 +198,12 @@ class BlipDiffusionControlNetPipelineFastTests(PipelineTesterMixin, unittest.Tes
         }
         return inputs
 
+    def test_dict_tuple_outputs_equivalent(self):
+        expected_slice = None
+        if torch_device == "cpu":
+            expected_slice = np.array([0.4803, 0.3865, 0.1422, 0.6119, 0.2283, 0.6365, 0.5453, 0.5205, 0.3581])
+        super().test_dict_tuple_outputs_equivalent(expected_slice=expected_slice)
+
     def test_blipdiffusion_controlnet(self):
         device = "cpu"
         components = self.get_dummy_components()
@@ -211,6 +219,10 @@ class BlipDiffusionControlNetPipelineFastTests(PipelineTesterMixin, unittest.Tes
         assert image.shape == (1, 16, 16, 4)
         expected_slice = np.array([0.7953, 0.7136, 0.6597, 0.4779, 0.7389, 0.4111, 0.5826, 0.4150, 0.8422])
 
-        assert (
-            np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        )
+
+    @unittest.skip("Test not supported because of complexities in deriving query_embeds.")
+    def test_encode_prompt_works_in_isolation(self):
+        pass

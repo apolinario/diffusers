@@ -35,27 +35,38 @@ from diffusers import (
 )
 from diffusers.pipelines.stable_diffusion import CLIPImageProjection
 from diffusers.utils import load_image
-from diffusers.utils.testing_utils import enable_full_determinism
+from diffusers.utils.testing_utils import enable_full_determinism, torch_device
 
 from ..pipeline_params import (
     TEXT_TO_IMAGE_BATCH_PARAMS,
     TEXT_TO_IMAGE_IMAGE_PARAMS,
     TEXT_TO_IMAGE_PARAMS,
 )
-from ..test_pipelines_common import PipelineKarrasSchedulerTesterMixin, PipelineLatentTesterMixin, PipelineTesterMixin
+from ..test_pipelines_common import (
+    PipelineFromPipeTesterMixin,
+    PipelineKarrasSchedulerTesterMixin,
+    PipelineLatentTesterMixin,
+    PipelineTesterMixin,
+)
 
 
 enable_full_determinism()
 
 
 class GligenTextImagePipelineFastTests(
-    PipelineLatentTesterMixin, PipelineKarrasSchedulerTesterMixin, PipelineTesterMixin, unittest.TestCase
+    PipelineLatentTesterMixin,
+    PipelineKarrasSchedulerTesterMixin,
+    PipelineTesterMixin,
+    PipelineFromPipeTesterMixin,
+    unittest.TestCase,
 ):
     pipeline_class = StableDiffusionGLIGENTextImagePipeline
     params = TEXT_TO_IMAGE_PARAMS | {"gligen_phrases", "gligen_images", "gligen_boxes"}
     batch_params = TEXT_TO_IMAGE_BATCH_PARAMS
     image_params = TEXT_TO_IMAGE_IMAGE_PARAMS
     image_latents_params = TEXT_TO_IMAGE_IMAGE_PARAMS
+
+    supports_dduf = False
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -151,6 +162,12 @@ class GligenTextImagePipelineFastTests(
         }
         return inputs
 
+    def test_dict_tuple_outputs_equivalent(self):
+        expected_slice = None
+        if torch_device == "cpu":
+            expected_slice = np.array([0.5052, 0.5546, 0.4567, 0.4770, 0.5195, 0.4085, 0.5026, 0.4909, 0.4495])
+        super().test_dict_tuple_outputs_equivalent(expected_slice=expected_slice)
+
     def test_stable_diffusion_gligen_text_image_default_case(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
         components = self.get_dummy_components()
@@ -190,3 +207,9 @@ class GligenTextImagePipelineFastTests(
 
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(batch_size=3, expected_max_diff=3e-3)
+
+    @unittest.skip(
+        "Test not supported because of the use of `text_encoder` in `get_cross_attention_kwargs_with_grounded()`."
+    )
+    def test_encode_prompt_works_in_isolation(self):
+        pass

@@ -19,9 +19,17 @@ import unittest
 import numpy as np
 import torch
 
-from diffusers import AutoencoderKL, DDIMScheduler, DiTPipeline, DPMSolverMultistepScheduler, Transformer2DModel
+from diffusers import AutoencoderKL, DDIMScheduler, DiTPipeline, DiTTransformer2DModel, DPMSolverMultistepScheduler
 from diffusers.utils import is_xformers_available
-from diffusers.utils.testing_utils import enable_full_determinism, load_numpy, nightly, require_torch_gpu, torch_device
+from diffusers.utils.testing_utils import (
+    backend_empty_cache,
+    enable_full_determinism,
+    load_numpy,
+    nightly,
+    numpy_cosine_similarity_distance,
+    require_torch_accelerator,
+    torch_device,
+)
 
 from ..pipeline_params import (
     CLASS_CONDITIONED_IMAGE_GENERATION_BATCH_PARAMS,
@@ -46,7 +54,7 @@ class DiTPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
     def get_dummy_components(self):
         torch.manual_seed(0)
-        transformer = Transformer2DModel(
+        transformer = DiTTransformer2DModel(
             sample_size=16,
             num_layers=2,
             patch_size=4,
@@ -74,7 +82,7 @@ class DiTPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             "class_labels": [1],
             "generator": generator,
             "num_inference_steps": 2,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -107,18 +115,23 @@ class DiTPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class DiTPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_dit_256(self):
         generator = torch.manual_seed(0)
 
         pipe = DiTPipeline.from_pretrained("facebook/DiT-XL-2-256")
-        pipe.to("cuda")
+        pipe.to(torch_device)
 
         words = ["vase", "umbrella", "white shark", "white wolf"]
         ids = pipe.get_label_ids(words)
@@ -134,7 +147,7 @@ class DiTPipelineIntegrationTests(unittest.TestCase):
     def test_dit_512(self):
         pipe = DiTPipeline.from_pretrained("facebook/DiT-XL-2-512")
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-        pipe.to("cuda")
+        pipe.to(torch_device)
 
         words = ["vase", "umbrella"]
         ids = pipe.get_label_ids(words)
@@ -144,8 +157,10 @@ class DiTPipelineIntegrationTests(unittest.TestCase):
 
         for word, image in zip(words, images):
             expected_image = load_numpy(
-                "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main"
-                f"/dit/{word}_512.npy"
+                f"https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/dit/{word}_512.npy"
             )
 
-            assert np.abs((expected_image - image).max()) < 1e-1
+            expected_slice = expected_image.flatten()
+            output_slice = image.flatten()
+
+            assert numpy_cosine_similarity_distance(expected_slice, output_slice) < 1e-2

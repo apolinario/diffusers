@@ -23,12 +23,20 @@ from transformers import CLIPImageProcessor, CLIPTextModelWithProjection, CLIPTo
 
 from ...models import StableCascadeUNet
 from ...schedulers import DDPMWuerstchenScheduler
-from ...utils import BaseOutput, logging, replace_example_docstring
+from ...utils import BaseOutput, is_torch_xla_available, logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 
 
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 DEFAULT_STAGE_C_TIMESTEPS = list(np.linspace(1.0, 2 / 3, 20)) + list(np.linspace(2 / 3, 0.0, 11))[1:]
 
@@ -54,19 +62,19 @@ class StableCascadePriorPipelineOutput(BaseOutput):
     Output class for WuerstchenPriorPipeline.
 
     Args:
-        image_embeddings (`torch.FloatTensor` or `np.ndarray`)
+        image_embeddings (`torch.Tensor` or `np.ndarray`)
             Prior image embeddings for text prompt
-        prompt_embeds (`torch.FloatTensor`):
+        prompt_embeds (`torch.Tensor`):
             Text embeddings for the prompt.
-        negative_prompt_embeds (`torch.FloatTensor`):
+        negative_prompt_embeds (`torch.Tensor`):
             Text embeddings for the negative prompt.
     """
 
-    image_embeddings: Union[torch.FloatTensor, np.ndarray]
-    prompt_embeds: Union[torch.FloatTensor, np.ndarray]
-    prompt_embeds_pooled: Union[torch.FloatTensor, np.ndarray]
-    negative_prompt_embeds: Union[torch.FloatTensor, np.ndarray]
-    negative_prompt_embeds_pooled: Union[torch.FloatTensor, np.ndarray]
+    image_embeddings: Union[torch.Tensor, np.ndarray]
+    prompt_embeds: Union[torch.Tensor, np.ndarray]
+    prompt_embeds_pooled: Union[torch.Tensor, np.ndarray]
+    negative_prompt_embeds: Union[torch.Tensor, np.ndarray]
+    negative_prompt_embeds_pooled: Union[torch.Tensor, np.ndarray]
 
 
 class StableCascadePriorPipeline(DiffusionPipeline):
@@ -80,7 +88,8 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         prior ([`StableCascadeUNet`]):
             The Stable Cascade prior to approximate the image embedding from the text and/or image embedding.
         text_encoder ([`CLIPTextModelWithProjection`]):
-            Frozen text-encoder ([laion/CLIP-ViT-bigG-14-laion2B-39B-b160k](https://huggingface.co/laion/CLIP-ViT-bigG-14-laion2B-39B-b160k)).
+            Frozen text-encoder
+            ([laion/CLIP-ViT-bigG-14-laion2B-39B-b160k](https://huggingface.co/laion/CLIP-ViT-bigG-14-laion2B-39B-b160k)).
         feature_extractor ([`~transformers.CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `image_encoder`.
         image_encoder ([`CLIPVisionModelWithProjection`]):
@@ -149,10 +158,10 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         do_classifier_free_guidance,
         prompt=None,
         negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_pooled: Optional[torch.Tensor] = None,
     ):
         if prompt_embeds is None:
             # get prompt text embeddings
@@ -352,7 +361,7 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         return self._num_timesteps
 
     def get_timestep_ratio_conditioning(self, t, alphas_cumprod):
-        s = torch.tensor([0.003])
+        s = torch.tensor([0.008])
         clamp_range = [0, 1]
         min_var = torch.cos(s / (1 + s) * torch.pi * 0.5) ** 2
         var = alphas_cumprod[t]
@@ -373,14 +382,14 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         timesteps: List[float] = None,
         guidance_scale: float = 4.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        image_embeds: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        image_embeds: Optional[torch.Tensor] = None,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pt",
         return_dict: bool = True,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
@@ -408,29 +417,29 @@ class StableCascadePriorPipeline(DiffusionPipeline):
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
                 if `decoder_guidance_scale` is less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            negative_prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds_pooled will be generated from `negative_prompt` input
-                argument.
-            image_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated image embeddings. Can be used to easily tweak image inputs, *e.g.* prompt weighting.
-                If not provided, image embeddings will be generated from `image` input argument if existing.
+                weighting. If not provided, negative_prompt_embeds_pooled will be generated from `negative_prompt`
+                input argument.
+            image_embeds (`torch.Tensor`, *optional*):
+                Pre-generated image embeddings. Can be used to easily tweak image inputs, *e.g.* prompt weighting. If
+                not provided, image embeddings will be generated from `image` input argument if existing.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
@@ -452,9 +461,9 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         Examples:
 
         Returns:
-            [`StableCascadePriorPipelineOutput`] or `tuple` [`StableCascadePriorPipelineOutput`] if
-            `return_dict` is True, otherwise a `tuple`. When returning a tuple, the first element is a list with the
-            generated image embeddings.
+            [`StableCascadePriorPipelineOutput`] or `tuple` [`StableCascadePriorPipelineOutput`] if `return_dict` is
+            True, otherwise a `tuple`. When returning a tuple, the first element is a list with the generated image
+            embeddings.
         """
 
         # 0. Define commonly used variables
@@ -556,7 +565,7 @@ class StableCascadePriorPipeline(DiffusionPipeline):
         if isinstance(self.scheduler, DDPMWuerstchenScheduler):
             timesteps = timesteps[:-1]
         else:
-            if self.scheduler.config.clip_sample:
+            if hasattr(self.scheduler.config, "clip_sample") and self.scheduler.config.clip_sample:
                 self.scheduler.config.clip_sample = False  # disample sample clipping
                 logger.warning(" set `clip_sample` to be False")
         # 6. Run denoising loop
@@ -610,15 +619,18 @@ class StableCascadePriorPipeline(DiffusionPipeline):
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
                 negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
+            if XLA_AVAILABLE:
+                xm.mark_step()
+
         # Offload all models
         self.maybe_free_model_hooks()
 
         if output_type == "np":
-            latents = latents.cpu().float().numpy()  # float() as bfloat16-> numpy doesnt work
-            prompt_embeds = prompt_embeds.cpu().float().numpy()  # float() as bfloat16-> numpy doesnt work
+            latents = latents.cpu().float().numpy()  # float() as bfloat16-> numpy doesn't work
+            prompt_embeds = prompt_embeds.cpu().float().numpy()  # float() as bfloat16-> numpy doesn't work
             negative_prompt_embeds = (
                 negative_prompt_embeds.cpu().float().numpy() if negative_prompt_embeds is not None else None
-            )  # float() as bfloat16-> numpy doesnt work
+            )  # float() as bfloat16-> numpy doesn't work
 
         if not return_dict:
             return (

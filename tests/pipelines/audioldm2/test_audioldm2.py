@@ -18,6 +18,7 @@ import gc
 import unittest
 
 import numpy as np
+import pytest
 import torch
 from transformers import (
     ClapAudioConfig,
@@ -26,7 +27,7 @@ from transformers import (
     ClapModel,
     ClapTextConfig,
     GPT2Config,
-    GPT2Model,
+    GPT2LMHeadModel,
     RobertaTokenizer,
     SpeechT5HifiGan,
     SpeechT5HifiGanConfig,
@@ -44,7 +45,7 @@ from diffusers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from diffusers.utils.testing_utils import enable_full_determinism, nightly, torch_device
+from diffusers.utils.testing_utils import enable_full_determinism, is_torch_version, nightly, torch_device
 
 from ..pipeline_params import TEXT_TO_AUDIO_BATCH_PARAMS, TEXT_TO_AUDIO_PARAMS
 from ..test_pipelines_common import PipelineTesterMixin
@@ -70,17 +71,20 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         ]
     )
 
+    supports_dduf = False
+
     def get_dummy_components(self):
         torch.manual_seed(0)
         unet = AudioLDM2UNet2DConditionModel(
-            block_out_channels=(32, 64),
-            layers_per_block=2,
+            block_out_channels=(8, 16),
+            layers_per_block=1,
+            norm_num_groups=8,
             sample_size=32,
             in_channels=4,
             out_channels=4,
             down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
             up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
-            cross_attention_dim=([None, 16, 32], [None, 16, 32]),
+            cross_attention_dim=(8, 16),
         )
         scheduler = DDIMScheduler(
             beta_start=0.00085,
@@ -91,9 +95,10 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         )
         torch.manual_seed(0)
         vae = AutoencoderKL(
-            block_out_channels=[32, 64],
+            block_out_channels=[8, 16],
             in_channels=1,
             out_channels=1,
+            norm_num_groups=8,
             down_block_types=["DownEncoderBlock2D", "DownEncoderBlock2D"],
             up_block_types=["UpDecoderBlock2D", "UpDecoderBlock2D"],
             latent_channels=4,
@@ -102,32 +107,34 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         text_branch_config = ClapTextConfig(
             bos_token_id=0,
             eos_token_id=2,
-            hidden_size=16,
+            hidden_size=8,
             intermediate_size=37,
             layer_norm_eps=1e-05,
-            num_attention_heads=2,
-            num_hidden_layers=2,
+            num_attention_heads=1,
+            num_hidden_layers=1,
             pad_token_id=1,
             vocab_size=1000,
-            projection_dim=16,
+            projection_dim=8,
         )
         audio_branch_config = ClapAudioConfig(
-            spec_size=64,
+            spec_size=8,
             window_size=4,
-            num_mel_bins=64,
+            num_mel_bins=8,
             intermediate_size=37,
             layer_norm_eps=1e-05,
-            depths=[2, 2],
-            num_attention_heads=[2, 2],
-            num_hidden_layers=2,
+            depths=[1, 1],
+            num_attention_heads=[1, 1],
+            num_hidden_layers=1,
             hidden_size=192,
-            projection_dim=16,
+            projection_dim=8,
             patch_size=2,
             patch_stride=2,
             patch_embed_input_channels=4,
         )
         text_encoder_config = ClapConfig.from_text_audio_configs(
-            text_config=text_branch_config, audio_config=audio_branch_config, projection_dim=16
+            text_config=text_branch_config,
+            audio_config=audio_branch_config,
+            projection_dim=16,
         )
         text_encoder = ClapModel(text_encoder_config)
         tokenizer = RobertaTokenizer.from_pretrained("hf-internal-testing/tiny-random-roberta", model_max_length=77)
@@ -141,8 +148,8 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             d_model=32,
             d_ff=37,
             d_kv=8,
-            num_heads=2,
-            num_layers=2,
+            num_heads=1,
+            num_layers=1,
         )
         text_encoder_2 = T5EncoderModel(text_encoder_2_config)
         tokenizer_2 = T5Tokenizer.from_pretrained("hf-internal-testing/tiny-random-T5Model", model_max_length=77)
@@ -150,17 +157,21 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         torch.manual_seed(0)
         language_model_config = GPT2Config(
             n_embd=16,
-            n_head=2,
-            n_layer=2,
+            n_head=1,
+            n_layer=1,
             vocab_size=1000,
             n_ctx=99,
             n_positions=99,
         )
-        language_model = GPT2Model(language_model_config)
+        language_model = GPT2LMHeadModel(language_model_config)
         language_model.config.max_new_tokens = 8
 
         torch.manual_seed(0)
-        projection_model = AudioLDM2ProjectionModel(text_encoder_dim=16, text_encoder_1_dim=32, langauge_model_dim=16)
+        projection_model = AudioLDM2ProjectionModel(
+            text_encoder_dim=16,
+            text_encoder_1_dim=32,
+            langauge_model_dim=16,
+        )
 
         vocoder_config = SpeechT5HifiGanConfig(
             model_in_dim=8,
@@ -220,7 +231,18 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
         audio_slice = audio[:10]
         expected_slice = np.array(
-            [0.0025, 0.0018, 0.0018, -0.0023, -0.0026, -0.0020, -0.0026, -0.0021, -0.0027, -0.0020]
+            [
+                2.602e-03,
+                1.729e-03,
+                1.863e-03,
+                -2.219e-03,
+                -2.656e-03,
+                -2.017e-03,
+                -2.648e-03,
+                -2.115e-03,
+                -2.502e-03,
+                -2.081e-03,
+            ]
         )
 
         assert np.abs(audio_slice - expected_slice).max() < 1e-4
@@ -361,7 +383,7 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
         audio_slice = audio[:10]
         expected_slice = np.array(
-            [0.0025, 0.0018, 0.0018, -0.0023, -0.0026, -0.0020, -0.0026, -0.0021, -0.0027, -0.0020]
+            [0.0026, 0.0017, 0.0018, -0.0022, -0.0026, -0.002, -0.0026, -0.0021, -0.0025, -0.0021]
         )
 
         assert np.abs(audio_slice - expected_slice).max() < 1e-4
@@ -388,7 +410,7 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         assert audios.shape == (batch_size, 256)
 
         # test num_waveforms_per_prompt for single prompt
-        num_waveforms_per_prompt = 2
+        num_waveforms_per_prompt = 1
         audios = audioldm_pipe(prompt, num_inference_steps=2, num_waveforms_per_prompt=num_waveforms_per_prompt).audios
 
         assert audios.shape == (num_waveforms_per_prompt, 256)
@@ -450,9 +472,14 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         pass
 
     def test_dict_tuple_outputs_equivalent(self):
-        # increase tolerance from 1e-4 -> 2e-4 to account for large composite model
-        super().test_dict_tuple_outputs_equivalent(expected_max_difference=2e-4)
+        # increase tolerance from 1e-4 -> 3e-4 to account for large composite model
+        super().test_dict_tuple_outputs_equivalent(expected_max_difference=3e-4)
 
+    @pytest.mark.xfail(
+        condition=is_torch_version(">=", "2.7"),
+        reason="Test currently fails on PyTorch 2.7.",
+        strict=False,
+    )
     def test_inference_batch_single_identical(self):
         # increase tolerance from 1e-4 -> 2e-4 to account for large composite model
         self._test_inference_batch_single_identical(expected_max_diff=2e-4)
@@ -487,12 +514,34 @@ class AudioLDM2PipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         model_dtypes = {key: component.dtype for key, component in components.items() if hasattr(component, "dtype")}
         self.assertTrue(all(dtype == torch.float16 for dtype in model_dtypes.values()))
 
+    @unittest.skip("Test not supported.")
     def test_sequential_cpu_offload_forward_pass(self):
+        pass
+
+    @unittest.skip("Test not supported for now because of the use of `projection_model` in `encode_prompt()`.")
+    def test_encode_prompt_works_in_isolation(self):
+        pass
+
+    @unittest.skip("Not supported yet due to CLAPModel.")
+    def test_sequential_offload_forward_pass_twice(self):
+        pass
+
+    @unittest.skip("Not supported yet, the second forward has mixed devices and `vocoder` is not offloaded.")
+    def test_cpu_offload_forward_pass_twice(self):
+        pass
+
+    @unittest.skip("Not supported yet. `vocoder` is not offloaded.")
+    def test_model_cpu_offload_forward_pass(self):
         pass
 
 
 @nightly
 class AudioLDM2PipelineSlowTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
@@ -504,6 +553,20 @@ class AudioLDM2PipelineSlowTests(unittest.TestCase):
         latents = torch.from_numpy(latents).to(device=device, dtype=dtype)
         inputs = {
             "prompt": "A hammer hitting a wooden surface",
+            "latents": latents,
+            "generator": generator,
+            "num_inference_steps": 3,
+            "guidance_scale": 2.5,
+        }
+        return inputs
+
+    def get_inputs_tts(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
+        generator = torch.Generator(device=generator_device).manual_seed(seed)
+        latents = np.random.RandomState(seed).standard_normal((1, 8, 128, 16))
+        latents = torch.from_numpy(latents).to(device=device, dtype=dtype)
+        inputs = {
+            "prompt": "A men saying",
+            "transcription": "hello my name is John",
             "latents": latents,
             "generator": generator,
             "num_inference_steps": 3,
@@ -556,6 +619,25 @@ class AudioLDM2PipelineSlowTests(unittest.TestCase):
 
         inputs = self.get_inputs(torch_device)
         audio = audioldm_pipe(**inputs).audios[0]
+
+        assert audio.ndim == 1
+        assert len(audio) == 81952
+
+        # check the portion of the generated audio with the largest dynamic range (reduces flakiness)
+        audio_slice = audio[8825:8835]
+        expected_slice = np.array(
+            [-0.1829, -0.1461, 0.0759, -0.1493, -0.1396, 0.5783, 0.3001, -0.3038, -0.0639, -0.2244]
+        )
+        max_diff = np.abs(expected_slice - audio_slice).max()
+        assert max_diff < 1e-3
+
+    def test_audioldm2_tts(self):
+        audioldm_tts_pipe = AudioLDM2Pipeline.from_pretrained("anhnct/audioldm2_gigaspeech")
+        audioldm_tts_pipe = audioldm_tts_pipe.to(torch_device)
+        audioldm_tts_pipe.set_progress_bar_config(disable=None)
+
+        inputs = self.get_inputs_tts(torch_device)
+        audio = audioldm_tts_pipe(**inputs).audios[0]
 
         assert audio.ndim == 1
         assert len(audio) == 81952

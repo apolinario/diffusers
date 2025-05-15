@@ -1,6 +1,6 @@
 ## Amused training
 
-Amused can be finetuned on simple datasets relatively cheaply and quickly. Using 8bit optimizers, lora, and gradient accumulation, amused can be finetuned with as little as 5.5 GB. Here are a set of examples for finetuning amused on some relatively simple datasets. These training recipies are aggressively oriented towards minimal resources and fast verification -- i.e. the batch sizes are quite low and the learning rates are quite high. For optimal quality, you will probably want to increase the batch sizes and decrease learning rates.
+Amused can be finetuned on simple datasets relatively cheaply and quickly. Using 8bit optimizers, lora, and gradient accumulation, amused can be finetuned with as little as 5.5 GB. Here are a set of examples for finetuning amused on some relatively simple datasets. These training recipes are aggressively oriented towards minimal resources and fast verification -- i.e. the batch sizes are quite low and the learning rates are quite high. For optimal quality, you will probably want to increase the batch sizes and decrease learning rates.
 
 All training examples use fp16 mixed precision and gradient checkpointing. We don't show 8 bit adam + lora as its about the same memory use as just using lora (bitsandbytes uses full precision optimizer states for weights below a minimum size).
 
@@ -211,7 +211,7 @@ accelerate launch train_amused.py \
     --gradient_checkpointing
 ```
 
-#### Full finetuning + lora 
+#### Full finetuning + lora
 
 Batch size: 8, Learning rate: 1e-4, Gives decent results in 500-1000 steps
 
@@ -268,7 +268,7 @@ Example results:
 
 Learning rate: 4e-4, Gives decent results in 1500-2000 steps
 
-Memory used: 6.5 GB 
+Memory used: 6.5 GB
 
 ```sh
 accelerate launch train_amused.py \
@@ -300,7 +300,7 @@ Example results:
 
 Learning rate: 1e-3, Lora alpha 1, Gives decent results in 1500-2000 steps
 
-Memory used: 5.6 GB 
+Memory used: 5.6 GB
 
 ```
 accelerate launch train_amused.py \

@@ -14,10 +14,11 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     load_image,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -119,6 +120,12 @@ class LatentConsistencyModelImg2ImgPipelineFastTests(
         }
         return inputs
 
+    def test_ip_adapter(self):
+        expected_pipe_slice = None
+        if torch_device == "cpu":
+            expected_pipe_slice = np.array([0.4003, 0.3718, 0.2863, 0.5500, 0.5587, 0.3772, 0.4617, 0.4961, 0.4417])
+        return super().test_ip_adapter(expected_pipe_slice=expected_pipe_slice)
+
     def test_lcm_onestep(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
 
@@ -214,13 +221,20 @@ class LatentConsistencyModelImg2ImgPipelineFastTests(
         output = pipe(**inputs)[0]
         assert output.abs().sum() == 0
 
+    def test_encode_prompt_works_in_isolation(self):
+        extra_required_param_value_dict = {
+            "device": torch.device(torch_device).type,
+            "do_classifier_free_guidance": self.get_dummy_inputs(device=torch_device).get("guidance_scale", 1.0) > 1.0,
+        }
+        return super().test_encode_prompt_works_in_isolation(extra_required_param_value_dict)
+
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class LatentConsistencyModelImg2ImgPipelineSlowTests(unittest.TestCase):
     def setUp(self):
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)
@@ -257,7 +271,7 @@ class LatentConsistencyModelImg2ImgPipelineSlowTests(unittest.TestCase):
         assert image.shape == (1, 512, 512, 3)
 
         image_slice = image[0, -3:, -3:, -1].flatten()
-        expected_slice = np.array([0.1950, 0.1961, 0.2308, 0.1786, 0.1837, 0.2320, 0.1898, 0.1885, 0.2309])
+        expected_slice = np.array([0.3479, 0.3314, 0.3555, 0.3430, 0.3649, 0.3423, 0.3239, 0.3117, 0.3240])
         assert np.abs(image_slice - expected_slice).max() < 1e-3
 
     def test_lcm_multistep(self):
@@ -273,5 +287,5 @@ class LatentConsistencyModelImg2ImgPipelineSlowTests(unittest.TestCase):
         assert image.shape == (1, 512, 512, 3)
 
         image_slice = image[0, -3:, -3:, -1].flatten()
-        expected_slice = np.array([0.3756, 0.3816, 0.3767, 0.3718, 0.3739, 0.3735, 0.3863, 0.3803, 0.3563])
+        expected_slice = np.array([0.1442, 0.1201, 0.1598, 0.1281, 0.1412, 0.1502, 0.1455, 0.1544, 0.1231])
         assert np.abs(image_slice - expected_slice).max() < 1e-3

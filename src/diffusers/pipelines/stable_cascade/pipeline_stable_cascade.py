@@ -15,17 +15,25 @@
 from typing import Callable, Dict, List, Optional, Union
 
 import torch
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer
 
 from ...models import StableCascadeUNet
 from ...schedulers import DDPMWuerstchenScheduler
-from ...utils import is_torch_version, logging, replace_example_docstring
+from ...utils import is_torch_version, is_torch_xla_available, logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from ..wuerstchen.modeling_paella_vq_model import PaellaVQModel
 
 
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -57,7 +65,7 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
     Args:
         tokenizer (`CLIPTokenizer`):
             The CLIP tokenizer.
-        text_encoder (`CLIPTextModel`):
+        text_encoder (`CLIPTextModelWithProjection`):
             The CLIP text encoder.
         decoder ([`StableCascadeUNet`]):
             The Stable Cascade decoder unet.
@@ -85,7 +93,7 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
         self,
         decoder: StableCascadeUNet,
         tokenizer: CLIPTokenizer,
-        text_encoder: CLIPTextModel,
+        text_encoder: CLIPTextModelWithProjection,
         scheduler: DDPMWuerstchenScheduler,
         vqgan: PaellaVQModel,
         latent_dim_scale: float = 10.67,
@@ -100,8 +108,10 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
         )
         self.register_to_config(latent_dim_scale=latent_dim_scale)
 
-    def prepare_latents(self, image_embeddings, num_images_per_prompt, dtype, device, generator, latents, scheduler):
-        batch_size, channels, height, width = image_embeddings.shape
+    def prepare_latents(
+        self, batch_size, image_embeddings, num_images_per_prompt, dtype, device, generator, latents, scheduler
+    ):
+        _, channels, height, width = image_embeddings.shape
         latents_shape = (
             batch_size * num_images_per_prompt,
             4,
@@ -127,10 +137,10 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
         do_classifier_free_guidance,
         prompt=None,
         negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_pooled: Optional[torch.Tensor] = None,
     ):
         if prompt_embeds is None:
             # get prompt text embeddings
@@ -279,22 +289,32 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
     def num_timesteps(self):
         return self._num_timesteps
 
+    def get_timestep_ratio_conditioning(self, t, alphas_cumprod):
+        s = torch.tensor([0.008])
+        clamp_range = [0, 1]
+        min_var = torch.cos(s / (1 + s) * torch.pi * 0.5) ** 2
+        var = alphas_cumprod[t]
+        var = var.clamp(*clamp_range)
+        s, min_var = s.to(var.device), min_var.to(var.device)
+        ratio = (((var * min_var) ** 0.5).acos() / (torch.pi * 0.5)) * (1 + s) - s
+        return ratio
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        image_embeddings: Union[torch.FloatTensor, List[torch.FloatTensor]],
+        image_embeddings: Union[torch.Tensor, List[torch.Tensor]],
         prompt: Union[str, List[str]] = None,
         num_inference_steps: int = 10,
         guidance_scale: float = 0.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_pooled: Optional[torch.Tensor] = None,
         num_images_per_prompt: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
@@ -304,7 +324,7 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
         Function invoked when calling the pipeline for generation.
 
         Args:
-            image_embedding (`torch.FloatTensor` or `List[torch.FloatTensor]`):
+            image_embedding (`torch.Tensor` or `List[torch.Tensor]`):
                 Image Embeddings either extracted from an image or generated by a Prior Model.
             prompt (`str` or `List[str]`):
                 The prompt or prompts to guide the image generation.
@@ -320,26 +340,26 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
                 if `decoder_guidance_scale` is less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
                 If not provided, pooled text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            negative_prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds_pooled will be generated from `negative_prompt` input
-                argument.
+                weighting. If not provided, negative_prompt_embeds_pooled will be generated from `negative_prompt`
+                input argument.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
@@ -383,7 +403,19 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
         )
         if isinstance(image_embeddings, list):
             image_embeddings = torch.cat(image_embeddings, dim=0)
-        batch_size = image_embeddings.shape[0]
+
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        # Compute the effective number of images per prompt
+        # We must account for the fact that the image embeddings from the prior can be generated with num_images_per_prompt > 1
+        # This results in a case where a single prompt is associated with multiple image embeddings
+        # Divide the number of image embeddings by the batch size to determine if this is the case.
+        num_images_per_prompt = num_images_per_prompt * (image_embeddings.shape[0] // batch_size)
 
         # 2. Encode caption
         if prompt_embeds is None and negative_prompt_embeds is None:
@@ -417,13 +449,33 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
 
         # 5. Prepare latents
         latents = self.prepare_latents(
-            image_embeddings, num_images_per_prompt, dtype, device, generator, latents, self.scheduler
+            batch_size, image_embeddings, num_images_per_prompt, dtype, device, generator, latents, self.scheduler
         )
 
+        if isinstance(self.scheduler, DDPMWuerstchenScheduler):
+            timesteps = timesteps[:-1]
+        else:
+            if hasattr(self.scheduler.config, "clip_sample") and self.scheduler.config.clip_sample:
+                self.scheduler.config.clip_sample = False  # disample sample clipping
+                logger.warning(" set `clip_sample` to be False")
+
         # 6. Run denoising loop
-        self._num_timesteps = len(timesteps[:-1])
-        for i, t in enumerate(self.progress_bar(timesteps[:-1])):
-            timestep_ratio = t.expand(latents.size(0)).to(dtype)
+        if hasattr(self.scheduler, "betas"):
+            alphas = 1.0 - self.scheduler.betas
+            alphas_cumprod = torch.cumprod(alphas, dim=0)
+        else:
+            alphas_cumprod = []
+
+        self._num_timesteps = len(timesteps)
+        for i, t in enumerate(self.progress_bar(timesteps)):
+            if not isinstance(self.scheduler, DDPMWuerstchenScheduler):
+                if len(alphas_cumprod) > 0:
+                    timestep_ratio = self.get_timestep_ratio_conditioning(t.long().cpu(), alphas_cumprod)
+                    timestep_ratio = timestep_ratio.expand(latents.size(0)).to(dtype).to(device)
+                else:
+                    timestep_ratio = t.float().div(self.scheduler.timesteps[-1]).expand(latents.size(0)).to(dtype)
+            else:
+                timestep_ratio = t.expand(latents.size(0)).to(dtype)
 
             # 7. Denoise latents
             predicted_latents = self.decoder(
@@ -440,6 +492,8 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
                 predicted_latents = torch.lerp(predicted_latents_uncond, predicted_latents_text, self.guidance_scale)
 
             # 9. Renoise latents to next timestep
+            if not isinstance(self.scheduler, DDPMWuerstchenScheduler):
+                timestep_ratio = t
             latents = self.scheduler.step(
                 model_output=predicted_latents,
                 timestep=timestep_ratio,
@@ -457,6 +511,9 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
                 prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
                 negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
+            if XLA_AVAILABLE:
+                xm.mark_step()
+
         if output_type not in ["pt", "np", "pil", "latent"]:
             raise ValueError(
                 f"Only the output types `pt`, `np`, `pil` and `latent` are supported not output_type={output_type}"
@@ -467,9 +524,9 @@ class StableCascadeDecoderPipeline(DiffusionPipeline):
             latents = self.vqgan.config.scale_factor * latents
             images = self.vqgan.decode(latents).sample.clamp(0, 1)
             if output_type == "np":
-                images = images.permute(0, 2, 3, 1).cpu().float().numpy()  # float() as bfloat16-> numpy doesnt work
+                images = images.permute(0, 2, 3, 1).cpu().float().numpy()  # float() as bfloat16-> numpy doesn't work
             elif output_type == "pil":
-                images = images.permute(0, 2, 3, 1).cpu().float().numpy()  # float() as bfloat16-> numpy doesnt work
+                images = images.permute(0, 2, 3, 1).cpu().float().numpy()  # float() as bfloat16-> numpy doesn't work
                 images = self.numpy_to_pil(images)
         else:
             images = latents

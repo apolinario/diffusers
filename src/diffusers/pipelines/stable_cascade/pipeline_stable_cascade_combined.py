@@ -15,7 +15,7 @@ from typing import Callable, Dict, List, Optional, Union
 
 import PIL
 import torch
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
+from transformers import CLIPImageProcessor, CLIPTextModelWithProjection, CLIPTokenizer, CLIPVisionModelWithProjection
 
 from ...models import StableCascadeUNet
 from ...schedulers import DDPMWuerstchenScheduler
@@ -31,7 +31,10 @@ TEXT2IMAGE_EXAMPLE_DOC_STRING = """
         ```py
         >>> import torch
         >>> from diffusers import StableCascadeCombinedPipeline
-        >>> pipe = StableCascadeCombinedPipeline.from_pretrained("stabilityai/stable-cascade", variant="bf16", torch_dtype=torch.bfloat16)
+
+        >>> pipe = StableCascadeCombinedPipeline.from_pretrained(
+        ...     "stabilityai/stable-cascade", variant="bf16", torch_dtype=torch.bfloat16
+        ... )
         >>> pipe.enable_model_cpu_offload()
         >>> prompt = "an image of a shiba inu, donning a spacesuit and helmet"
         >>> images = pipe(prompt=prompt)
@@ -49,7 +52,7 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
     Args:
         tokenizer (`CLIPTokenizer`):
             The decoder tokenizer to be used for text inputs.
-        text_encoder (`CLIPTextModel`):
+        text_encoder (`CLIPTextModelWithProjection`):
             The decoder text encoder to be used for text inputs.
         decoder (`StableCascadeUNet`):
             The decoder model to be used for decoder image generation pipeline.
@@ -57,27 +60,32 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
             The scheduler to be used for decoder image generation pipeline.
         vqgan (`PaellaVQModel`):
             The VQGAN model to be used for decoder image generation pipeline.
-        feature_extractor ([`~transformers.CLIPImageProcessor`]):
-            Model that extracts features from generated images to be used as inputs for the `image_encoder`.
-        image_encoder ([`CLIPVisionModelWithProjection`]):
-            Frozen CLIP image-encoder ([clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14)).
         prior_prior (`StableCascadeUNet`):
             The prior model to be used for prior pipeline.
+        prior_text_encoder (`CLIPTextModelWithProjection`):
+            The prior text encoder to be used for text inputs.
+        prior_tokenizer (`CLIPTokenizer`):
+            The prior tokenizer to be used for text inputs.
         prior_scheduler (`DDPMWuerstchenScheduler`):
             The scheduler to be used for prior pipeline.
+        prior_feature_extractor ([`~transformers.CLIPImageProcessor`]):
+            Model that extracts features from generated images to be used as inputs for the `image_encoder`.
+        prior_image_encoder ([`CLIPVisionModelWithProjection`]):
+            Frozen CLIP image-encoder ([clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14)).
     """
 
     _load_connected_pipes = True
+    _optional_components = ["prior_feature_extractor", "prior_image_encoder"]
 
     def __init__(
         self,
         tokenizer: CLIPTokenizer,
-        text_encoder: CLIPTextModel,
+        text_encoder: CLIPTextModelWithProjection,
         decoder: StableCascadeUNet,
         scheduler: DDPMWuerstchenScheduler,
         vqgan: PaellaVQModel,
         prior_prior: StableCascadeUNet,
-        prior_text_encoder: CLIPTextModel,
+        prior_text_encoder: CLIPTextModelWithProjection,
         prior_tokenizer: CLIPTokenizer,
         prior_scheduler: DDPMWuerstchenScheduler,
         prior_feature_extractor: Optional[CLIPImageProcessor] = None,
@@ -117,25 +125,25 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
     def enable_xformers_memory_efficient_attention(self, attention_op: Optional[Callable] = None):
         self.decoder_pipe.enable_xformers_memory_efficient_attention(attention_op)
 
-    def enable_model_cpu_offload(self, gpu_id=0):
+    def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         r"""
         Offloads all models to CPU using accelerate, reducing memory usage with a low impact on performance. Compared
         to `enable_sequential_cpu_offload`, this method moves one whole model at a time to the GPU when its `forward`
         method is called, and the model remains in GPU until the next model runs. Memory savings are lower than with
         `enable_sequential_cpu_offload`, but performance is much better due to the iterative execution of the `unet`.
         """
-        self.prior_pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-        self.decoder_pipe.enable_model_cpu_offload(gpu_id=gpu_id)
+        self.prior_pipe.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
+        self.decoder_pipe.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
 
-    def enable_sequential_cpu_offload(self, gpu_id=0):
+    def enable_sequential_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         r"""
         Offloads all models (`unet`, `text_encoder`, `vae`, and `safety checker` state dicts) to CPU using 🤗
         Accelerate, significantly reducing memory usage. Models are moved to a `torch.device('meta')` and loaded on a
         GPU only when their specific submodule's `forward` method is called. Offloading happens on a submodule basis.
         Memory savings are higher than using `enable_model_cpu_offload`, but performance is lower.
         """
-        self.prior_pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
-        self.decoder_pipe.enable_sequential_cpu_offload(gpu_id=gpu_id)
+        self.prior_pipe.enable_sequential_cpu_offload(gpu_id=gpu_id, device=device)
+        self.decoder_pipe.enable_sequential_cpu_offload(gpu_id=gpu_id, device=device)
 
     def progress_bar(self, iterable=None, total=None):
         self.prior_pipe.progress_bar(iterable=iterable, total=total)
@@ -158,13 +166,13 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
         num_inference_steps: int = 12,
         decoder_guidance_scale: float = 0.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds_pooled: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds_pooled: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds_pooled: Optional[torch.Tensor] = None,
         num_images_per_prompt: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         prior_callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
@@ -183,17 +191,17 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation. Ignored when not using guidance (i.e., ignored
                 if `guidance_scale` is less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings for the prior. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, text embeddings will be generated from `prompt` input argument.
-            prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings for the prior. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings for the prior. Can be used to easily tweak text inputs, *e.g.*
                 prompt weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
-            negative_prompt_embeds_pooled (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds_pooled (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings for the prior. Can be used to easily tweak text inputs, *e.g.*
                 prompt weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -226,7 +234,7 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
@@ -242,7 +250,7 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
             prior_callback_on_step_end_tensor_inputs (`List`, *optional*):
                 The list of tensor inputs for the `prior_callback_on_step_end` function. The tensors specified in the
                 list will be passed as `callback_kwargs` argument. You will only be able to include variables listed in
-                the `._callback_tensor_inputs` attribute of your pipeine class.
+                the `._callback_tensor_inputs` attribute of your pipeline class.
             callback_on_step_end (`Callable`, *optional*):
                 A function that calls at the end of each denoising steps during the inference. The function is called
                 with the following arguments: `callback_on_step_end(self: DiffusionPipeline, step: int, timestep: int,
@@ -251,7 +259,7 @@ class StableCascadeCombinedPipeline(DiffusionPipeline):
             callback_on_step_end_tensor_inputs (`List`, *optional*):
                 The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
-                `._callback_tensor_inputs` attribute of your pipeine class.
+                `._callback_tensor_inputs` attribute of your pipeline class.
 
         Examples:
 

@@ -13,8 +13,9 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -107,6 +108,12 @@ class LatentConsistencyModelPipelineFastTests(
             "output_type": "np",
         }
         return inputs
+
+    def test_ip_adapter(self):
+        expected_pipe_slice = None
+        if torch_device == "cpu":
+            expected_pipe_slice = np.array([0.1403, 0.5072, 0.5316, 0.1202, 0.3865, 0.4211, 0.5363, 0.3557, 0.3645])
+        return super().test_ip_adapter(expected_pipe_slice=expected_pipe_slice)
 
     def test_lcm_onestep(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
@@ -207,13 +214,20 @@ class LatentConsistencyModelPipelineFastTests(
         output = pipe(**inputs)[0]
         assert output.abs().sum() == 0
 
+    def test_encode_prompt_works_in_isolation(self):
+        extra_required_param_value_dict = {
+            "device": torch.device(torch_device).type,
+            "do_classifier_free_guidance": self.get_dummy_inputs(device=torch_device).get("guidance_scale", 1.0) > 1.0,
+        }
+        return super().test_encode_prompt_works_in_isolation(extra_required_param_value_dict)
+
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class LatentConsistencyModelPipelineSlowTests(unittest.TestCase):
     def setUp(self):
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)

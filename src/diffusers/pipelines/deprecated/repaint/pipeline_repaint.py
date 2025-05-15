@@ -91,7 +91,7 @@ class RePaintPipeline(DiffusionPipeline):
     scheduler: RePaintScheduler
     model_cpu_offload_seq = "unet"
 
-    def __init__(self, unet, scheduler):
+    def __init__(self, unet: UNet2DModel, scheduler: RePaintScheduler):
         super().__init__()
         self.register_modules(unet=unet, scheduler=scheduler)
 
@@ -112,9 +112,9 @@ class RePaintPipeline(DiffusionPipeline):
         The call function to the pipeline for generation.
 
         Args:
-            image (`torch.FloatTensor` or `PIL.Image.Image`):
+            image (`torch.Tensor` or `PIL.Image.Image`):
                 The original image to inpaint on.
-            mask_image (`torch.FloatTensor` or `PIL.Image.Image`):
+            mask_image (`torch.Tensor` or `PIL.Image.Image`):
                 The mask_image where 0.0 define which part of the original image to inpaint.
             num_inference_steps (`int`, *optional*, defaults to 1000):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the

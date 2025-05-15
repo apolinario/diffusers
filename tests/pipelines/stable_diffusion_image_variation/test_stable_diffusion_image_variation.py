@@ -30,13 +30,17 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
+    backend_max_memory_allocated,
+    backend_reset_max_memory_allocated,
+    backend_reset_peak_memory_stats,
     enable_full_determinism,
     floats_tensor,
     load_image,
     load_numpy,
     nightly,
     numpy_cosine_similarity_distance,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -57,6 +61,8 @@ class StableDiffusionImageVariationPipelineFastTests(
     image_params = frozenset([])
     # TO-DO: update image_params once pipeline is refactored with VaeImageProcessor.preprocess
     image_latents_params = frozenset([])
+
+    supports_dduf = False
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -117,7 +123,7 @@ class StableDiffusionImageVariationPipelineFastTests(
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -133,7 +139,7 @@ class StableDiffusionImageVariationPipelineFastTests(
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.5239, 0.5723, 0.4796, 0.5049, 0.5550, 0.4685, 0.5329, 0.4891, 0.4921])
+        expected_slice = np.array([0.5348, 0.5924, 0.4798, 0.5237, 0.5741, 0.4651, 0.5344, 0.4942, 0.4851])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
 
@@ -153,7 +159,7 @@ class StableDiffusionImageVariationPipelineFastTests(
         image_slice = image[-1, -3:, -3:, -1]
 
         assert image.shape == (2, 64, 64, 3)
-        expected_slice = np.array([0.6892, 0.5637, 0.5836, 0.5771, 0.6254, 0.6409, 0.5580, 0.5569, 0.5289])
+        expected_slice = np.array([0.6647, 0.5557, 0.5723, 0.5567, 0.5869, 0.6044, 0.5502, 0.5439, 0.5189])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
 
@@ -162,12 +168,17 @@ class StableDiffusionImageVariationPipelineFastTests(
 
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)
@@ -200,7 +211,7 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1].flatten()
 
         assert image.shape == (1, 512, 512, 3)
-        expected_slice = np.array([0.8449, 0.9079, 0.7571, 0.7873, 0.8348, 0.7010, 0.6694, 0.6873, 0.6138])
+        expected_slice = np.array([0.5348, 0.5924, 0.4798, 0.5237, 0.5741, 0.4651, 0.5344, 0.4942, 0.4851])
 
         max_diff = numpy_cosine_similarity_distance(image_slice, expected_slice)
         assert max_diff < 1e-4
@@ -208,7 +219,7 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
     def test_stable_diffusion_img_variation_intermediate_state(self):
         number_of_steps = 0
 
-        def callback_fn(step: int, timestep: int, latents: torch.FloatTensor) -> None:
+        def callback_fn(step: int, timestep: int, latents: torch.Tensor) -> None:
             callback_fn.has_been_called = True
             nonlocal number_of_steps
             number_of_steps += 1
@@ -216,7 +227,7 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
                 latents = latents.detach().cpu().numpy()
                 assert latents.shape == (1, 4, 64, 64)
                 latents_slice = latents[0, -3:, -3:, -1]
-                expected_slice = np.array([-0.7974, -0.4343, -1.087, 0.04785, -1.327, 0.855, -2.148, -0.1725, 1.439])
+                expected_slice = np.array([0.5348, 0.5924, 0.4798, 0.5237, 0.5741, 0.4651, 0.5344, 0.4942, 0.4851])
                 max_diff = numpy_cosine_similarity_distance(latents_slice.flatten(), expected_slice)
 
                 assert max_diff < 1e-3
@@ -225,7 +236,7 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
                 latents = latents.detach().cpu().numpy()
                 assert latents.shape == (1, 4, 64, 64)
                 latents_slice = latents[0, -3:, -3:, -1]
-                expected_slice = np.array([0.3232, 0.004883, 0.913, -1.084, 0.6143, -1.6875, -2.463, -0.439, -0.419])
+                expected_slice = np.array([0.5348, 0.5924, 0.4798, 0.5237, 0.5741, 0.4651, 0.5344, 0.4942, 0.4851])
                 max_diff = numpy_cosine_similarity_distance(latents_slice.flatten(), expected_slice)
 
                 assert max_diff < 1e-3
@@ -251,33 +262,37 @@ class StableDiffusionImageVariationPipelineSlowTests(unittest.TestCase):
         assert number_of_steps == inputs["num_inference_steps"]
 
     def test_stable_diffusion_pipeline_with_sequential_cpu_offloading(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_max_memory_allocated()
-        torch.cuda.reset_peak_memory_stats()
+        backend_empty_cache(torch_device)
+        backend_reset_max_memory_allocated(torch_device)
+        backend_reset_peak_memory_stats(torch_device)
 
         pipe = StableDiffusionImageVariationPipeline.from_pretrained(
             "lambdalabs/sd-image-variations-diffusers", safety_checker=None, torch_dtype=torch.float16
         )
-        pipe = pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         pipe.enable_attention_slicing(1)
-        pipe.enable_sequential_cpu_offload()
+        pipe.enable_sequential_cpu_offload(device=torch_device)
 
         inputs = self.get_inputs(torch_device, dtype=torch.float16)
         _ = pipe(**inputs)
 
-        mem_bytes = torch.cuda.max_memory_allocated()
+        mem_bytes = backend_max_memory_allocated(torch_device)
         # make sure that less than 2.6 GB is allocated
         assert mem_bytes < 2.6 * 10**9
 
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class StableDiffusionImageVariationPipelineNightlyTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def get_inputs(self, device, generator_device="cpu", dtype=torch.float32, seed=0):
         generator = torch.Generator(device=generator_device).manual_seed(seed)
@@ -293,7 +308,7 @@ class StableDiffusionImageVariationPipelineNightlyTests(unittest.TestCase):
             "generator": generator,
             "num_inference_steps": 50,
             "guidance_scale": 7.5,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 

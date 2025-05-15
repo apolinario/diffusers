@@ -29,17 +29,19 @@ from diffusers import (
     VQModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     is_flaky,
     load_image,
     load_numpy,
-    require_torch_gpu,
+    numpy_cosine_similarity_distance,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
 
-from ..test_pipelines_common import PipelineTesterMixin, assert_mean_pixel_difference
+from ..test_pipelines_common import PipelineTesterMixin
 
 
 enable_full_determinism()
@@ -232,12 +234,12 @@ class KandinskyV22InpaintPipelineFastTests(PipelineTesterMixin, unittest.TestCas
             [0.50775903, 0.49527195, 0.48824543, 0.50192237, 0.48644906, 0.49373814, 0.4780598, 0.47234827, 0.48327848]
         )
 
-        assert (
-            np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
-        assert (
-            np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        )
+        assert np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        )
 
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(expected_max_diff=3e-3)
@@ -291,13 +293,19 @@ class KandinskyV22InpaintPipelineFastTests(PipelineTesterMixin, unittest.TestCas
 
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class KandinskyV22InpaintPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_kandinsky_inpaint(self):
         expected_image = load_numpy(
@@ -306,7 +314,7 @@ class KandinskyV22InpaintPipelineIntegrationTests(unittest.TestCase):
         )
 
         init_image = load_image(
-            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main" "/kandinsky/cat.png"
+            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/kandinsky/cat.png"
         )
         mask = np.zeros((768, 768), dtype=np.float32)
         mask[:250, 250:-250] = 1
@@ -328,17 +336,18 @@ class KandinskyV22InpaintPipelineIntegrationTests(unittest.TestCase):
         image_emb, zero_image_emb = pipe_prior(
             prompt,
             generator=generator,
-            num_inference_steps=5,
+            num_inference_steps=2,
             negative_prompt="",
         ).to_tuple()
 
+        generator = torch.Generator(device="cpu").manual_seed(0)
         output = pipeline(
             image=init_image,
             mask_image=mask,
             image_embeds=image_emb,
             negative_image_embeds=zero_image_emb,
             generator=generator,
-            num_inference_steps=100,
+            num_inference_steps=2,
             height=768,
             width=768,
             output_type="np",
@@ -348,4 +357,5 @@ class KandinskyV22InpaintPipelineIntegrationTests(unittest.TestCase):
 
         assert image.shape == (768, 768, 3)
 
-        assert_mean_pixel_difference(image, expected_image)
+        max_diff = numpy_cosine_similarity_distance(expected_image.flatten(), image.flatten())
+        assert max_diff < 1e-4

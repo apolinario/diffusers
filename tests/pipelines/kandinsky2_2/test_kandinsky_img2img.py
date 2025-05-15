@@ -29,16 +29,18 @@ from diffusers import (
     VQModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     load_image,
     load_numpy,
-    require_torch_gpu,
+    numpy_cosine_similarity_distance,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
 
-from ..test_pipelines_common import PipelineTesterMixin, assert_mean_pixel_difference
+from ..test_pipelines_common import PipelineTesterMixin
 
 
 enable_full_determinism()
@@ -226,25 +228,31 @@ class KandinskyV22Img2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCas
         assert image.shape == (1, 64, 64, 3)
 
         expected_slice = np.array([0.5712, 0.5443, 0.4725, 0.6195, 0.5184, 0.4651, 0.4473, 0.4590, 0.5016])
-        assert (
-            np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
-        assert (
-            np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        )
+        assert np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        )
 
     def test_float16_inference(self):
         super().test_float16_inference(expected_max_diff=2e-1)
 
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class KandinskyV22Img2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_kandinsky_img2img(self):
         expected_image = load_numpy(
@@ -253,20 +261,19 @@ class KandinskyV22Img2ImgPipelineIntegrationTests(unittest.TestCase):
         )
 
         init_image = load_image(
-            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main" "/kandinsky/cat.png"
+            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/kandinsky/cat.png"
         )
         prompt = "A red cartoon frog, 4k"
 
         pipe_prior = KandinskyV22PriorPipeline.from_pretrained(
             "kandinsky-community/kandinsky-2-2-prior", torch_dtype=torch.float16
         )
-        pipe_prior.to(torch_device)
+        pipe_prior.enable_model_cpu_offload(device=torch_device)
 
         pipeline = KandinskyV22Img2ImgPipeline.from_pretrained(
             "kandinsky-community/kandinsky-2-2-decoder", torch_dtype=torch.float16
         )
-        pipeline = pipeline.to(torch_device)
-
+        pipeline.enable_model_cpu_offload(device=torch_device)
         pipeline.set_progress_bar_config(disable=None)
 
         generator = torch.Generator(device="cpu").manual_seed(0)
@@ -277,12 +284,13 @@ class KandinskyV22Img2ImgPipelineIntegrationTests(unittest.TestCase):
             negative_prompt="",
         ).to_tuple()
 
+        generator = torch.Generator(device="cpu").manual_seed(0)
         output = pipeline(
             image=init_image,
             image_embeds=image_emb,
             negative_image_embeds=zero_image_emb,
             generator=generator,
-            num_inference_steps=100,
+            num_inference_steps=5,
             height=768,
             width=768,
             strength=0.2,
@@ -293,4 +301,5 @@ class KandinskyV22Img2ImgPipelineIntegrationTests(unittest.TestCase):
 
         assert image.shape == (768, 768, 3)
 
-        assert_mean_pixel_difference(image, expected_image)
+        max_diff = numpy_cosine_similarity_distance(expected_image.flatten(), image.flatten())
+        assert max_diff < 1e-4

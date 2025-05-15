@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Logging utilities."""
+"""Logging utilities."""
 
 import logging
 import os
@@ -60,8 +60,7 @@ def _get_default_logging_level() -> int:
             return log_levels[env_level_str]
         else:
             logging.getLogger().warning(
-                f"Unknown option DIFFUSERS_VERBOSITY={env_level_str}, "
-                f"has to be one of: { ', '.join(log_levels.keys()) }"
+                f"Unknown option DIFFUSERS_VERBOSITY={env_level_str}, has to be one of: {', '.join(log_levels.keys())}"
             )
     return _default_log_level
 
@@ -82,7 +81,9 @@ def _configure_library_root_logger() -> None:
             # This library has already configured the library root logger.
             return
         _default_handler = logging.StreamHandler()  # Set sys.stderr as stream.
-        _default_handler.flush = sys.stderr.flush
+
+        if sys.stderr:  # only if sys.stderr exists, e.g. when not using pythonw in windows
+            _default_handler.flush = sys.stderr.flush
 
         # Apply our default configuration to the library root logger.
         library_root_logger = _get_library_root_logger()

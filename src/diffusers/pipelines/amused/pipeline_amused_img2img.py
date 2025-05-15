@@ -20,8 +20,16 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer
 from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...models import UVit2DModel, VQModel
 from ...schedulers import AmusedScheduler
-from ...utils import replace_example_docstring
+from ...utils import is_torch_xla_available, replace_example_docstring
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+
+
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
 
 
 EXAMPLE_DOC_STRING = """
@@ -81,7 +89,9 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
             transformer=transformer,
             scheduler=scheduler,
         )
-        self.vae_scale_factor = 2 ** (len(self.vqvae.config.block_out_channels) - 1)
+        self.vae_scale_factor = (
+            2 ** (len(self.vqvae.config.block_out_channels) - 1) if getattr(self, "vqvae", None) else 8
+        )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_normalize=False)
 
     @torch.no_grad()
@@ -102,7 +112,7 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
         negative_encoder_hidden_states: Optional[torch.Tensor] = None,
         output_type="pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         micro_conditioning_aesthetic_score: int = 6,
@@ -115,7 +125,7 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
         Args:
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
-            image (`torch.FloatTensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
                 `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
                 numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
                 or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
@@ -127,7 +137,7 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
                 on the amount of noise initially added. When `strength` is 1, added noise is maximum and the denoising
                 process runs for the full number of iterations specified in `num_inference_steps`. A value of 1
                 essentially ignores `image`.
-            num_inference_steps (`int`, *optional*, defaults to 16):
+            num_inference_steps (`int`, *optional*, defaults to 12):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
             guidance_scale (`float`, *optional*, defaults to 10.0):
@@ -141,16 +151,16 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
             generator (`torch.Generator`, *optional*):
                 A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
                 generation deterministic.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs (prompt weighting). If not
                 provided, text embeddings are generated from the `prompt` input argument. A single vector from the
                 pooled and projected final hidden states.
-            encoder_hidden_states (`torch.FloatTensor`, *optional*):
+            encoder_hidden_states (`torch.Tensor`, *optional*):
                 Pre-generated penultimate hidden states from the text encoder providing additional text conditioning.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs (prompt weighting). If
                 not provided, `negative_prompt_embeds` are generated from the `negative_prompt` input argument.
-            negative_encoder_hidden_states (`torch.FloatTensor`, *optional*):
+            negative_encoder_hidden_states (`torch.Tensor`, *optional*):
                 Analogous to `encoder_hidden_states` for the positive prompt.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generated image. Choose between `PIL.Image` or `np.array`.
@@ -159,7 +169,7 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
                 plain tuple.
             callback (`Callable`, *optional*):
                 A function that calls every `callback_steps` steps during inference. The function is called with the
-                following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function is called. If not specified, the callback is called at
                 every step.
@@ -167,10 +177,12 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
                 A kwargs dictionary that if specified is passed along to the [`AttentionProcessor`] as defined in
                 [`self.processor`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
             micro_conditioning_aesthetic_score (`int`, *optional*, defaults to 6):
-                The targeted aesthetic score according to the laion aesthetic classifier. See https://laion.ai/blog/laion-aesthetics/
-                and the micro-conditioning section of https://arxiv.org/abs/2307.01952.
+                The targeted aesthetic score according to the laion aesthetic classifier. See
+                https://laion.ai/blog/laion-aesthetics/ and the micro-conditioning section of
+                https://arxiv.org/abs/2307.01952.
             micro_conditioning_crop_coord (`Tuple[int]`, *optional*, defaults to (0, 0)):
-                The targeted height, width crop coordinates. See the micro-conditioning section of https://arxiv.org/abs/2307.01952.
+                The targeted height, width crop coordinates. See the micro-conditioning section of
+                https://arxiv.org/abs/2307.01952.
             temperature (`Union[int, Tuple[int, int], List[int]]`, *optional*, defaults to (2, 0)):
                 Configures the temperature scheduler on `self.scheduler` see `AmusedScheduler#set_timesteps`.
 
@@ -191,7 +203,7 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
             negative_prompt_embeds is None and negative_encoder_hidden_states is not None
         ):
             raise ValueError(
-                "pass either both `negatve_prompt_embeds` and `negative_encoder_hidden_states` or neither"
+                "pass either both `negative_prompt_embeds` and `negative_encoder_hidden_states` or neither"
             )
 
         if (prompt is None and prompt_embeds is None) or (prompt is not None and prompt_embeds is not None):
@@ -320,6 +332,9 @@ class AmusedImg2ImgPipeline(DiffusionPipeline):
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, timestep, latents)
+
+                if XLA_AVAILABLE:
+                    xm.mark_step()
 
         if output_type == "latent":
             output = latents

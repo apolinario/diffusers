@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Conversion script for stable diffusion checkpoints which _only_ contain a controlnet. """
+"""Conversion script for stable diffusion checkpoints which _only_ contain a controlnet."""
 
 import argparse
 import re
@@ -59,6 +59,7 @@ from diffusers.schedulers import (
     UnCLIPScheduler,
 )
 from diffusers.utils import is_accelerate_available, logging
+from diffusers.utils.constants import DIFFUSERS_REQUEST_TIMEOUT
 
 
 if is_accelerate_available():
@@ -1435,7 +1436,7 @@ def download_from_original_stable_diffusion_ckpt(
             config_url = "https://raw.githubusercontent.com/Stability-AI/stablediffusion/main/configs/stable-diffusion/x4-upscaling.yaml"
 
         if config_url is not None:
-            original_config_file = BytesIO(requests.get(config_url).content)
+            original_config_file = BytesIO(requests.get(config_url, timeout=DIFFUSERS_REQUEST_TIMEOUT).content)
         else:
             with open(original_config_file, "r") as f:
                 original_config_file = f.read()
@@ -2051,7 +2052,7 @@ if __name__ == "__main__":
         default=512,
         type=int,
         help=(
-            "The image size that the model was trained on. Use 512 for Stable Diffusion v1.X and Stable Siffusion v2"
+            "The image size that the model was trained on. Use 512 for Stable Diffusion v1.X and Stable Diffusion v2"
             " Base. Use 768 for Stable Diffusion v2."
         ),
     )

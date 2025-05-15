@@ -40,7 +40,6 @@ from ..test_pipelines_common import (
     PipelineKarrasSchedulerTesterMixin,
     PipelineLatentTesterMixin,
     PipelineTesterMixin,
-    SDXLOptionalComponentsTesterMixin,
 )
 
 
@@ -51,7 +50,6 @@ class StableDiffusionXLInstructPix2PixPipelineFastTests(
     PipelineLatentTesterMixin,
     PipelineKarrasSchedulerTesterMixin,
     PipelineTesterMixin,
-    SDXLOptionalComponentsTesterMixin,
     unittest.TestCase,
 ):
     pipeline_class = StableDiffusionXLInstructPix2PixPipeline
@@ -143,7 +141,7 @@ class StableDiffusionXLInstructPix2PixPipelineFastTests(
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
             "image_guidance_scale": 1,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -182,8 +180,10 @@ class StableDiffusionXLInstructPix2PixPipelineFastTests(
         max_diff = np.abs(out - out_latents_inputs).max()
         self.assertLess(max_diff, 1e-4, "passing latents as image input generate different result from passing image")
 
+    @unittest.skip("Test not supported at the moment.")
     def test_cfg(self):
         pass
 
+    @unittest.skip("Functionality is tested elsewhere.")
     def test_save_load_optional_components(self):
-        self._test_save_load_optional_components()
+        pass

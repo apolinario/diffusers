@@ -31,11 +31,13 @@ from diffusers import (
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     load_image,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
+    torch_device,
 )
 
 from ..pipeline_params import (
@@ -152,6 +154,12 @@ class Kandinsky3Img2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCase)
         }
         return inputs
 
+    def test_dict_tuple_outputs_equivalent(self):
+        expected_slice = None
+        if torch_device == "cpu":
+            expected_slice = np.array([0.5762, 0.6112, 0.4150, 0.6018, 0.6167, 0.4626, 0.5426, 0.5641, 0.6536])
+        super().test_dict_tuple_outputs_equivalent(expected_slice=expected_slice)
+
     def test_kandinsky3_img2img(self):
         device = "cpu"
 
@@ -173,9 +181,9 @@ class Kandinsky3Img2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCase)
             [0.576259, 0.6132097, 0.41703486, 0.603196, 0.62062526, 0.4655338, 0.5434324, 0.5660727, 0.65433365]
         )
 
-        assert (
-            np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        )
 
     def test_float16_inference(self):
         super().test_float16_inference(expected_max_diff=1e-1)
@@ -185,19 +193,25 @@ class Kandinsky3Img2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCase)
 
 
 @slow
-@require_torch_gpu
+@require_torch_accelerator
 class Kandinsky3Img2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_kandinskyV3_img2img(self):
         pipe = AutoPipelineForImage2Image.from_pretrained(
             "kandinsky-community/kandinsky-3", variant="fp16", torch_dtype=torch.float16
         )
-        pipe.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload(device=torch_device)
         pipe.set_progress_bar_config(disable=None)
 
         generator = torch.Generator(device="cpu").manual_seed(0)
@@ -209,7 +223,7 @@ class Kandinsky3Img2ImgPipelineIntegrationTests(unittest.TestCase):
         image = image.resize((w, h), resample=Image.BICUBIC, reducing_gap=1)
         prompt = "A painting of the inside of a subway train with tiny raccoons."
 
-        image = pipe(prompt, image=image, strength=0.75, num_inference_steps=25, generator=generator).images[0]
+        image = pipe(prompt, image=image, strength=0.75, num_inference_steps=5, generator=generator).images[0]
 
         assert image.size == (512, 512)
 

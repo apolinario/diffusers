@@ -22,7 +22,7 @@ The original codebase can be found [here](https://github.com/ali-vilab/i2vgen-xl
 
 <Tip>
 
-Make sure to check out the Schedulers [guide](../../using-diffusers/schedulers) to learn how to explore the tradeoff between scheduler speed and quality, and see the [reuse components across pipelines](../../using-diffusers/loading#reuse-components-across-pipelines) section to learn how to efficiently load the same components into multiple pipelines. Also, to know more about reducing the memory usage of this pipeline, refer to the ["Reduce memory usage"] section [here](../../using-diffusers/svd#reduce-memory-usage).
+Make sure to check out the Schedulers [guide](../../using-diffusers/schedulers) to learn how to explore the tradeoff between scheduler speed and quality, and see the [reuse components across pipelines](../../using-diffusers/loading#reuse-a-pipeline) section to learn how to efficiently load the same components into multiple pipelines. Also, to know more about reducing the memory usage of this pipeline, refer to the ["Reduce memory usage"] section [here](../../using-diffusers/svd#reduce-memory-usage).
 
 </Tip>
 
@@ -47,6 +47,7 @@ Sample output with I2VGenXL:
 * Unlike SVD, it additionally accepts text prompts as inputs.
 * It can generate higher resolution videos.
 * When using the [`DDIMScheduler`] (which is default for this pipeline), less than 50 steps for inference leads to bad results.
+* This implementation is 1-stage variant of I2VGenXL. The main figure in the [I2VGen-XL](https://arxiv.org/abs/2311.04145) paper shows a 2-stage variant, however, 1-stage variant works well. See [this discussion](https://github.com/huggingface/diffusers/discussions/7952) for more details.
 
 ## I2VGenXLPipeline
 [[autodoc]] I2VGenXLPipeline

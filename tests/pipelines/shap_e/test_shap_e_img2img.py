@@ -23,11 +23,12 @@ from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
 from diffusers import HeunDiscreteScheduler, PriorTransformer, ShapEImg2ImgPipeline
 from diffusers.pipelines.shap_e import ShapERenderer
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     floats_tensor,
     load_image,
     load_numpy,
     nightly,
-    require_torch_gpu,
+    require_torch_accelerator,
     torch_device,
 )
 
@@ -49,6 +50,8 @@ class ShapEImg2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         "return_dict",
     ]
     test_xformers_attention = False
+
+    supports_dduf = False
 
     @property
     def text_embedder_hidden_size(self):
@@ -248,17 +251,23 @@ class ShapEImg2ImgPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class ShapEImg2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_shap_e_img2img(self):
         input_image = load_image(
-            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main" "/shap_e/corgi.png"
+            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/shap_e/corgi.png"
         )
         expected_image = load_numpy(
             "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main"

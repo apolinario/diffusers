@@ -1,5 +1,6 @@
 import functools
 import importlib
+import importlib.metadata
 import inspect
 import io
 import logging
@@ -13,11 +14,11 @@ import tempfile
 import time
 import unittest
 import urllib.parse
+from collections import UserDict
 from contextlib import contextmanager
-from distutils.util import strtobool
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import PIL.Image
@@ -26,21 +27,39 @@ import requests
 from numpy.linalg import norm
 from packaging import version
 
+from .constants import DIFFUSERS_REQUEST_TIMEOUT
 from .import_utils import (
     BACKENDS_MAPPING,
+    is_accelerate_available,
+    is_bitsandbytes_available,
     is_compel_available,
     is_flax_available,
+    is_gguf_available,
     is_note_seq_available,
     is_onnx_available,
     is_opencv_available,
+    is_optimum_quanto_available,
     is_peft_available,
+    is_timm_available,
     is_torch_available,
     is_torch_version,
+    is_torchao_available,
     is_torchsde_available,
     is_transformers_available,
 )
 from .logging import get_logger
 
+
+if is_torch_available():
+    import torch
+
+    IS_ROCM_SYSTEM = torch.version.hip is not None
+    IS_CUDA_SYSTEM = torch.version.cuda is not None
+    IS_XPU_SYSTEM = getattr(torch.version, "xpu", None) is not None
+else:
+    IS_ROCM_SYSTEM = False
+    IS_CUDA_SYSTEM = False
+    IS_XPU_SYSTEM = False
 
 global_rng = random.Random()
 
@@ -54,6 +73,7 @@ _required_transformers_version = is_transformers_available() and version.parse(
 ) > version.parse("4.33")
 
 USE_PEFT_BACKEND = _required_peft_version and _required_transformers_version
+BIG_GPU_MEMORY = int(os.getenv("BIG_GPU_MEMORY", 40))
 
 if is_torch_available():
     import torch
@@ -80,7 +100,12 @@ if is_torch_available():
             ) from e
         logger.info(f"torch_device overrode to {torch_device}")
     else:
-        torch_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            torch_device = "cuda"
+        elif torch.xpu.is_available():
+            torch_device = "xpu"
+        else:
+            torch_device = "cpu"
         is_torch_higher_equal_than_1_12 = version.parse(
             version.parse(torch.__version__).base_version
         ) >= version.parse("1.12")
@@ -89,6 +114,8 @@ if is_torch_available():
             # Some builds of torch 1.12 don't have the mps backend registered. See #892 for more details
             mps_backend_registered = hasattr(torch.backends, "mps")
             torch_device = "mps" if (mps_backend_registered and torch.backends.mps.is_available()) else torch_device
+
+    from .torch_utils import get_torch_cuda_device_capability
 
 
 def torch_all_close(a, b, *args, **kwargs):
@@ -106,10 +133,21 @@ def numpy_cosine_similarity_distance(a, b):
     return distance
 
 
-def print_tensor_test(tensor, filename="test_corrections.txt", expected_tensor_name="expected_slice"):
+def print_tensor_test(
+    tensor,
+    limit_to_slices=None,
+    max_torch_print=None,
+    filename="test_corrections.txt",
+    expected_tensor_name="expected_slice",
+):
+    if max_torch_print:
+        torch.set_printoptions(threshold=10_000)
+
     test_name = os.environ.get("PYTEST_CURRENT_TEST")
     if not torch.is_tensor(tensor):
         tensor = torch.from_numpy(tensor)
+    if limit_to_slices:
+        tensor = tensor[0, -3:, -3:, -1]
 
     tensor_str = str(tensor.detach().cpu().flatten().to(torch.float32)).replace("\n", "")
     # format is usually:
@@ -118,7 +156,7 @@ def print_tensor_test(tensor, filename="test_corrections.txt", expected_tensor_n
     test_file, test_class, test_fn = test_name.split("::")
     test_fn = test_fn.split()[0]
     with open(filename, "a") as f:
-        print(";".join([test_file, test_class, test_fn, output_str]), file=f)
+        print("::".join([test_file, test_class, test_fn, output_str]), file=f)
 
 
 def get_tests_dir(append_path=None):
@@ -142,6 +180,22 @@ def get_tests_dir(append_path=None):
         return tests_dir
 
 
+# Taken from the following PR:
+# https://github.com/huggingface/accelerate/pull/1964
+def str_to_bool(value) -> int:
+    """
+    Converts a string representation of truth to `True` (1) or `False` (0). True values are `y`, `yes`, `t`, `true`,
+    `on`, and `1`; False value are `n`, `no`, `f`, `false`, `off`, and `0`;
+    """
+    value = value.lower()
+    if value in ("y", "yes", "t", "true", "on", "1"):
+        return 1
+    elif value in ("n", "no", "f", "false", "off", "0"):
+        return 0
+    else:
+        raise ValueError(f"invalid truth value {value}")
+
+
 def parse_flag_from_env(key, default=False):
     try:
         value = os.environ[key]
@@ -151,7 +205,7 @@ def parse_flag_from_env(key, default=False):
     else:
         # KEY is set, convert it to True or False.
         try:
-            _value = strtobool(value)
+            _value = str_to_bool(value)
         except ValueError:
             # More values are supported, but let's keep the message simple.
             raise ValueError(f"If set, {key} must be yes or no.")
@@ -160,6 +214,7 @@ def parse_flag_from_env(key, default=False):
 
 _run_slow_tests = parse_flag_from_env("RUN_SLOW", default=False)
 _run_nightly_tests = parse_flag_from_env("RUN_NIGHTLY", default=False)
+_run_compile_tests = parse_flag_from_env("RUN_COMPILE", default=False)
 
 
 def floats_tensor(shape, scale=1.0, rng=None, name=None):
@@ -198,6 +253,16 @@ def nightly(test_case):
     return unittest.skipUnless(_run_nightly_tests, "test is nightly")(test_case)
 
 
+def is_torch_compile(test_case):
+    """
+    Decorator marking a test that runs compile tests in the diffusers CI.
+
+    Compile tests are skipped by default. Set the RUN_COMPILE environment variable to a truthy value to run them.
+
+    """
+    return unittest.skipUnless(_run_compile_tests, "test is torch compile")(test_case)
+
+
 def require_torch(test_case):
     """
     Decorator marking a test that requires PyTorch. These tests are skipped when PyTorch isn't installed.
@@ -214,11 +279,37 @@ def require_torch_2(test_case):
     )
 
 
+def require_torch_version_greater_equal(torch_version):
+    """Decorator marking a test that requires torch with a specific version or greater."""
+
+    def decorator(test_case):
+        correct_torch_version = is_torch_available() and is_torch_version(">=", torch_version)
+        return unittest.skipUnless(
+            correct_torch_version, f"test requires torch with the version greater than or equal to {torch_version}"
+        )(test_case)
+
+    return decorator
+
+
 def require_torch_gpu(test_case):
     """Decorator marking a test that requires CUDA and PyTorch."""
     return unittest.skipUnless(is_torch_available() and torch_device == "cuda", "test requires PyTorch+CUDA")(
         test_case
     )
+
+
+def require_torch_cuda_compatibility(expected_compute_capability):
+    def decorator(test_case):
+        if not torch.cuda.is_available():
+            return unittest.skip(test_case)
+        else:
+            current_compute_capability = get_torch_cuda_device_capability()
+            return unittest.skipUnless(
+                float(current_compute_capability) == float(expected_compute_capability),
+                "Test not supported for this compute capability.",
+            )
+
+    return decorator
 
 
 # These decorators are for accelerator-specific behaviours that are not GPU-specific
@@ -227,6 +318,35 @@ def require_torch_accelerator(test_case):
     return unittest.skipUnless(is_torch_available() and torch_device != "cpu", "test requires accelerator+PyTorch")(
         test_case
     )
+
+
+def require_torch_multi_gpu(test_case):
+    """
+    Decorator marking a test that requires a multi-GPU setup (in PyTorch). These tests are skipped on a machine without
+    multiple GPUs. To run *only* the multi_gpu tests, assuming all test names contain multi_gpu: $ pytest -sv ./tests
+    -k "multi_gpu"
+    """
+    if not is_torch_available():
+        return unittest.skip("test requires PyTorch")(test_case)
+
+    import torch
+
+    return unittest.skipUnless(torch.cuda.device_count() > 1, "test requires multiple GPUs")(test_case)
+
+
+def require_torch_multi_accelerator(test_case):
+    """
+    Decorator marking a test that requires a multi-accelerator setup (in PyTorch). These tests are skipped on a machine
+    without multiple hardware accelerators.
+    """
+    if not is_torch_available():
+        return unittest.skip("test requires PyTorch")(test_case)
+
+    import torch
+
+    return unittest.skipUnless(
+        torch.cuda.device_count() > 1 or torch.xpu.device_count() > 1, "test requires multiple hardware accelerators"
+    )(test_case)
 
 
 def require_torch_accelerator_with_fp16(test_case):
@@ -241,6 +361,51 @@ def require_torch_accelerator_with_fp64(test_case):
     return unittest.skipUnless(_is_torch_fp64_available(torch_device), "test requires accelerator with fp64 support")(
         test_case
     )
+
+
+def require_big_gpu_with_torch_cuda(test_case):
+    """
+    Decorator marking a test that requires a bigger GPU (24GB) for execution. Some example pipelines: Flux, SD3, Cog,
+    etc.
+    """
+    if not is_torch_available():
+        return unittest.skip("test requires PyTorch")(test_case)
+
+    import torch
+
+    if not torch.cuda.is_available():
+        return unittest.skip("test requires PyTorch CUDA")(test_case)
+
+    device_properties = torch.cuda.get_device_properties(0)
+    total_memory = device_properties.total_memory / (1024**3)
+    return unittest.skipUnless(
+        total_memory >= BIG_GPU_MEMORY, f"test requires a GPU with at least {BIG_GPU_MEMORY} GB memory"
+    )(test_case)
+
+
+def require_big_accelerator(test_case):
+    """
+    Decorator marking a test that requires a bigger hardware accelerator (24GB) for execution. Some example pipelines:
+    Flux, SD3, Cog, etc.
+    """
+    if not is_torch_available():
+        return unittest.skip("test requires PyTorch")(test_case)
+
+    import torch
+
+    if not (torch.cuda.is_available() or torch.xpu.is_available()):
+        return unittest.skip("test requires PyTorch CUDA")(test_case)
+
+    if torch.xpu.is_available():
+        device_properties = torch.xpu.get_device_properties(0)
+    else:
+        device_properties = torch.cuda.get_device_properties(0)
+
+    total_memory = device_properties.total_memory / (1024**3)
+    return unittest.skipUnless(
+        total_memory >= BIG_GPU_MEMORY,
+        f"test requires a hardware accelerator with at least {BIG_GPU_MEMORY} GB memory",
+    )(test_case)
 
 
 def require_torch_accelerator_with_training(test_case):
@@ -285,6 +450,14 @@ def require_note_seq(test_case):
     return unittest.skipUnless(is_note_seq_available(), "test requires note_seq")(test_case)
 
 
+def require_accelerator(test_case):
+    """
+    Decorator marking a test that requires a hardware accelerator backend. These tests are skipped when there are no
+    hardware accelerator available.
+    """
+    return unittest.skipUnless(torch_device != "cpu", "test requires a hardware accelerator")(test_case)
+
+
 def require_torchsde(test_case):
     """
     Decorator marking a test that requires torchsde. These tests are skipped when torchsde isn't installed.
@@ -298,6 +471,34 @@ def require_peft_backend(test_case):
     transformers.
     """
     return unittest.skipUnless(USE_PEFT_BACKEND, "test requires PEFT backend")(test_case)
+
+
+def require_timm(test_case):
+    """
+    Decorator marking a test that requires timm. These tests are skipped when timm isn't installed.
+    """
+    return unittest.skipUnless(is_timm_available(), "test requires timm")(test_case)
+
+
+def require_bitsandbytes(test_case):
+    """
+    Decorator marking a test that requires bitsandbytes. These tests are skipped when bitsandbytes isn't installed.
+    """
+    return unittest.skipUnless(is_bitsandbytes_available(), "test requires bitsandbytes")(test_case)
+
+
+def require_quanto(test_case):
+    """
+    Decorator marking a test that requires quanto. These tests are skipped when quanto isn't installed.
+    """
+    return unittest.skipUnless(is_optimum_quanto_available(), "test requires quanto")(test_case)
+
+
+def require_accelerate(test_case):
+    """
+    Decorator marking a test that requires accelerate. These tests are skipped when accelerate isn't installed.
+    """
+    return unittest.skipUnless(is_accelerate_available(), "test requires accelerate")(test_case)
 
 
 def require_peft_version_greater(peft_version):
@@ -317,6 +518,84 @@ def require_peft_version_greater(peft_version):
     return decorator
 
 
+def require_transformers_version_greater(transformers_version):
+    """
+    Decorator marking a test that requires transformers with a specific version, this would require some specific
+    versions of PEFT and transformers.
+    """
+
+    def decorator(test_case):
+        correct_transformers_version = is_transformers_available() and version.parse(
+            version.parse(importlib.metadata.version("transformers")).base_version
+        ) > version.parse(transformers_version)
+        return unittest.skipUnless(
+            correct_transformers_version,
+            f"test requires transformers with the version greater than {transformers_version}",
+        )(test_case)
+
+    return decorator
+
+
+def require_accelerate_version_greater(accelerate_version):
+    def decorator(test_case):
+        correct_accelerate_version = is_accelerate_available() and version.parse(
+            version.parse(importlib.metadata.version("accelerate")).base_version
+        ) > version.parse(accelerate_version)
+        return unittest.skipUnless(
+            correct_accelerate_version, f"Test requires accelerate with the version greater than {accelerate_version}."
+        )(test_case)
+
+    return decorator
+
+
+def require_bitsandbytes_version_greater(bnb_version):
+    def decorator(test_case):
+        correct_bnb_version = is_bitsandbytes_available() and version.parse(
+            version.parse(importlib.metadata.version("bitsandbytes")).base_version
+        ) > version.parse(bnb_version)
+        return unittest.skipUnless(
+            correct_bnb_version, f"Test requires bitsandbytes with the version greater than {bnb_version}."
+        )(test_case)
+
+    return decorator
+
+
+def require_hf_hub_version_greater(hf_hub_version):
+    def decorator(test_case):
+        correct_hf_hub_version = version.parse(
+            version.parse(importlib.metadata.version("huggingface_hub")).base_version
+        ) > version.parse(hf_hub_version)
+        return unittest.skipUnless(
+            correct_hf_hub_version, f"Test requires huggingface_hub with the version greater than {hf_hub_version}."
+        )(test_case)
+
+    return decorator
+
+
+def require_gguf_version_greater_or_equal(gguf_version):
+    def decorator(test_case):
+        correct_gguf_version = is_gguf_available() and version.parse(
+            version.parse(importlib.metadata.version("gguf")).base_version
+        ) >= version.parse(gguf_version)
+        return unittest.skipUnless(
+            correct_gguf_version, f"Test requires gguf with the version greater than {gguf_version}."
+        )(test_case)
+
+    return decorator
+
+
+def require_torchao_version_greater_or_equal(torchao_version):
+    def decorator(test_case):
+        correct_torchao_version = is_torchao_available() and version.parse(
+            version.parse(importlib.metadata.version("torchao")).base_version
+        ) >= version.parse(torchao_version)
+        return unittest.skipUnless(
+            correct_torchao_version, f"Test requires torchao with version greater than {torchao_version}."
+        )(test_case)
+
+    return decorator
+
+
 def deprecate_after_peft_backend(test_case):
     """
     Decorator marking a test that will be skipped after PEFT backend
@@ -324,13 +603,10 @@ def deprecate_after_peft_backend(test_case):
     return unittest.skipUnless(not USE_PEFT_BACKEND, "test skipped in favor of PEFT backend")(test_case)
 
 
-def require_python39_or_higher(test_case):
-    def python39_available():
-        sys_info = sys.version_info
-        major, minor = sys_info.major, sys_info.minor
-        return major == 3 and minor >= 9
-
-    return unittest.skipUnless(python39_available(), "test requires Python 3.9 or higher")(test_case)
+def get_python_version():
+    sys_info = sys.version_info
+    major, minor = sys_info.major, sys_info.minor
+    return major, minor
 
 
 def load_numpy(arry: Union[str, np.ndarray], local_path: Optional[str] = None) -> np.ndarray:
@@ -339,7 +615,7 @@ def load_numpy(arry: Union[str, np.ndarray], local_path: Optional[str] = None) -
             # local_path can be passed to correct images of tests
             return Path(local_path, arry.split("/")[-5], arry.split("/")[-2], arry.split("/")[-1]).as_posix()
         elif arry.startswith("http://") or arry.startswith("https://"):
-            response = requests.get(arry)
+            response = requests.get(arry, timeout=DIFFUSERS_REQUEST_TIMEOUT)
             response.raise_for_status()
             arry = np.load(BytesIO(response.content))
         elif os.path.isfile(arry):
@@ -359,10 +635,10 @@ def load_numpy(arry: Union[str, np.ndarray], local_path: Optional[str] = None) -
     return arry
 
 
-def load_pt(url: str):
-    response = requests.get(url)
+def load_pt(url: str, map_location: str):
+    response = requests.get(url, timeout=DIFFUSERS_REQUEST_TIMEOUT)
     response.raise_for_status()
-    arry = torch.load(BytesIO(response.content))
+    arry = torch.load(BytesIO(response.content), map_location=map_location)
     return arry
 
 
@@ -379,7 +655,7 @@ def load_image(image: Union[str, PIL.Image.Image]) -> PIL.Image.Image:
     """
     if isinstance(image, str):
         if image.startswith("http://") or image.startswith("https://"):
-            image = PIL.Image.open(requests.get(image, stream=True).raw)
+            image = PIL.Image.open(requests.get(image, stream=True, timeout=DIFFUSERS_REQUEST_TIMEOUT).raw)
         elif os.path.isfile(image):
             image = PIL.Image.open(image)
         else:
@@ -614,7 +890,7 @@ def pytest_terminal_summary_main(tr, id):
             f.write("slowest durations\n")
             for i, rep in enumerate(dlist):
                 if rep.duration < durations_min:
-                    f.write(f"{len(dlist)-i} durations < {durations_min} secs were omitted")
+                    f.write(f"{len(dlist) - i} durations < {durations_min} secs were omitted")
                     break
                 f.write(f"{rep.duration:02.2f}s {rep.when:<8} {rep.nodeid}\n")
 
@@ -759,7 +1035,7 @@ def run_test_in_subprocess(test_case, target_func, inputs=None, timeout=None):
     process.join(timeout=timeout)
 
     if results["error"] is not None:
-        test_case.fail(f'{results["error"]}')
+        test_case.fail(f"{results['error']}")
 
 
 class CaptureLogger:
@@ -873,12 +1149,58 @@ def _is_torch_fp64_available(device):
 # Guard these lookups for when Torch is not used - alternative accelerator support is for PyTorch
 if is_torch_available():
     # Behaviour flags
-    BACKEND_SUPPORTS_TRAINING = {"cuda": True, "cpu": True, "mps": False, "default": True}
+    BACKEND_SUPPORTS_TRAINING = {"cuda": True, "xpu": True, "cpu": True, "mps": False, "default": True}
 
     # Function definitions
-    BACKEND_EMPTY_CACHE = {"cuda": torch.cuda.empty_cache, "cpu": None, "mps": None, "default": None}
-    BACKEND_DEVICE_COUNT = {"cuda": torch.cuda.device_count, "cpu": lambda: 0, "mps": lambda: 0, "default": 0}
-    BACKEND_MANUAL_SEED = {"cuda": torch.cuda.manual_seed, "cpu": torch.manual_seed, "default": torch.manual_seed}
+    BACKEND_EMPTY_CACHE = {
+        "cuda": torch.cuda.empty_cache,
+        "xpu": torch.xpu.empty_cache,
+        "cpu": None,
+        "mps": torch.mps.empty_cache,
+        "default": None,
+    }
+    BACKEND_DEVICE_COUNT = {
+        "cuda": torch.cuda.device_count,
+        "xpu": torch.xpu.device_count,
+        "cpu": lambda: 0,
+        "mps": lambda: 0,
+        "default": 0,
+    }
+    BACKEND_MANUAL_SEED = {
+        "cuda": torch.cuda.manual_seed,
+        "xpu": torch.xpu.manual_seed,
+        "cpu": torch.manual_seed,
+        "mps": torch.mps.manual_seed,
+        "default": torch.manual_seed,
+    }
+    BACKEND_RESET_PEAK_MEMORY_STATS = {
+        "cuda": torch.cuda.reset_peak_memory_stats,
+        "xpu": getattr(torch.xpu, "reset_peak_memory_stats", None),
+        "cpu": None,
+        "mps": None,
+        "default": None,
+    }
+    BACKEND_RESET_MAX_MEMORY_ALLOCATED = {
+        "cuda": torch.cuda.reset_max_memory_allocated,
+        "xpu": getattr(torch.xpu, "reset_peak_memory_stats", None),
+        "cpu": None,
+        "mps": None,
+        "default": None,
+    }
+    BACKEND_MAX_MEMORY_ALLOCATED = {
+        "cuda": torch.cuda.max_memory_allocated,
+        "xpu": getattr(torch.xpu, "max_memory_allocated", None),
+        "cpu": 0,
+        "mps": 0,
+        "default": 0,
+    }
+    BACKEND_SYNCHRONIZE = {
+        "cuda": torch.cuda.synchronize,
+        "xpu": getattr(torch.xpu, "synchronize", None),
+        "cpu": None,
+        "mps": None,
+        "default": None,
+    }
 
 
 # This dispatches a defined function according to the accelerator from the function definitions.
@@ -901,12 +1223,28 @@ def backend_manual_seed(device: str, seed: int):
     return _device_agnostic_dispatch(device, BACKEND_MANUAL_SEED, seed)
 
 
+def backend_synchronize(device: str):
+    return _device_agnostic_dispatch(device, BACKEND_SYNCHRONIZE)
+
+
 def backend_empty_cache(device: str):
     return _device_agnostic_dispatch(device, BACKEND_EMPTY_CACHE)
 
 
 def backend_device_count(device: str):
     return _device_agnostic_dispatch(device, BACKEND_DEVICE_COUNT)
+
+
+def backend_reset_peak_memory_stats(device: str):
+    return _device_agnostic_dispatch(device, BACKEND_RESET_PEAK_MEMORY_STATS)
+
+
+def backend_reset_max_memory_allocated(device: str):
+    return _device_agnostic_dispatch(device, BACKEND_RESET_MAX_MEMORY_ALLOCATED)
+
+
+def backend_max_memory_allocated(device: str):
+    return _device_agnostic_dispatch(device, BACKEND_MAX_MEMORY_ALLOCATED)
 
 
 # These are callables which return boolean behaviour flags and can be used to specify some
@@ -965,3 +1303,96 @@ if is_torch_available():
         update_mapping_from_spec(BACKEND_EMPTY_CACHE, "EMPTY_CACHE_FN")
         update_mapping_from_spec(BACKEND_DEVICE_COUNT, "DEVICE_COUNT_FN")
         update_mapping_from_spec(BACKEND_SUPPORTS_TRAINING, "SUPPORTS_TRAINING")
+        update_mapping_from_spec(BACKEND_RESET_PEAK_MEMORY_STATS, "RESET_PEAK_MEMORY_STATS_FN")
+        update_mapping_from_spec(BACKEND_RESET_MAX_MEMORY_ALLOCATED, "RESET_MAX_MEMORY_ALLOCATED_FN")
+        update_mapping_from_spec(BACKEND_MAX_MEMORY_ALLOCATED, "MAX_MEMORY_ALLOCATED_FN")
+
+
+# Modified from https://github.com/huggingface/transformers/blob/cdfb018d0300fef3b07d9220f3efe9c2a9974662/src/transformers/testing_utils.py#L3090
+
+# Type definition of key used in `Expectations` class.
+DeviceProperties = Tuple[Union[str, None], Union[int, None]]
+
+
+@functools.lru_cache
+def get_device_properties() -> DeviceProperties:
+    """
+    Get environment device properties.
+    """
+    if IS_CUDA_SYSTEM or IS_ROCM_SYSTEM:
+        import torch
+
+        major, _ = torch.cuda.get_device_capability()
+        if IS_ROCM_SYSTEM:
+            return ("rocm", major)
+        else:
+            return ("cuda", major)
+    elif IS_XPU_SYSTEM:
+        import torch
+
+        # To get more info of the architecture meaning and bit allocation, refer to https://github.com/intel/llvm/blob/sycl/sycl/include/sycl/ext/oneapi/experimental/device_architecture.def
+        arch = torch.xpu.get_device_capability()["architecture"]
+        gen_mask = 0x000000FF00000000
+        gen = (arch & gen_mask) >> 32
+        return ("xpu", gen)
+    else:
+        return (torch_device, None)
+
+
+if TYPE_CHECKING:
+    DevicePropertiesUserDict = UserDict[DeviceProperties, Any]
+else:
+    DevicePropertiesUserDict = UserDict
+
+
+class Expectations(DevicePropertiesUserDict):
+    def get_expectation(self) -> Any:
+        """
+        Find best matching expectation based on environment device properties.
+        """
+        return self.find_expectation(get_device_properties())
+
+    @staticmethod
+    def is_default(key: DeviceProperties) -> bool:
+        return all(p is None for p in key)
+
+    @staticmethod
+    def score(key: DeviceProperties, other: DeviceProperties) -> int:
+        """
+        Returns score indicating how similar two instances of the `Properties` tuple are. Points are calculated using
+        bits, but documented as int. Rules are as follows:
+            * Matching `type` gives 8 points.
+            * Semi-matching `type`, for example cuda and rocm, gives 4 points.
+            * Matching `major` (compute capability major version) gives 2 points.
+            * Default expectation (if present) gives 1 points.
+        """
+        (device_type, major) = key
+        (other_device_type, other_major) = other
+
+        score = 0b0
+        if device_type == other_device_type:
+            score |= 0b1000
+        elif device_type in ["cuda", "rocm"] and other_device_type in ["cuda", "rocm"]:
+            score |= 0b100
+
+        if major == other_major and other_major is not None:
+            score |= 0b10
+
+        if Expectations.is_default(other):
+            score |= 0b1
+
+        return int(score)
+
+    def find_expectation(self, key: DeviceProperties = (None, None)) -> Any:
+        """
+        Find best matching expectation based on provided device properties.
+        """
+        (result_key, result) = max(self.data.items(), key=lambda x: Expectations.score(key, x[0]))
+
+        if Expectations.score(key, result_key) == 0:
+            raise ValueError(f"No matching expectation found for {key}")
+
+        return result
+
+    def __repr__(self):
+        return f"{self.data}"

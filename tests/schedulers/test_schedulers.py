@@ -361,7 +361,7 @@ class SchedulerCommonTest(unittest.TestCase):
             if isinstance(t, torch.Tensor):
                 num_dims = len(sample.shape)
                 # pad t with 1s to match num_dims
-                t = t.reshape(-1, *(1,) * (num_dims - 1)).to(sample.device).to(sample.dtype)
+                t = t.reshape(-1, *(1,) * (num_dims - 1)).to(sample.device, dtype=sample.dtype)
 
             return sample * t / (t + 1)
 
@@ -716,13 +716,13 @@ class SchedulerCommonTest(unittest.TestCase):
                 # Get valid timestep based on sigma_max, which should always be in timestep schedule.
                 scaled_sigma_max = scheduler.sigma_to_t(scheduler.config.sigma_max)
                 scaled_sample = scheduler.scale_model_input(sample, scaled_sigma_max)
-            if scheduler_class == EDMEulerScheduler:
+            elif scheduler_class == EDMEulerScheduler:
                 scaled_sample = scheduler.scale_model_input(sample, scheduler.timesteps[-1])
             else:
                 scaled_sample = scheduler.scale_model_input(sample, 0.0)
             self.assertEqual(sample.shape, scaled_sample.shape)
 
-            noise = torch.randn_like(scaled_sample).to(torch_device)
+            noise = torch.randn(scaled_sample.shape).to(torch_device)
             t = scheduler.timesteps[5][None]
             noised = scheduler.add_noise(scaled_sample, noise, t)
             self.assertEqual(noised.shape, scaled_sample.shape)
@@ -782,7 +782,7 @@ class SchedulerCommonTest(unittest.TestCase):
             # no warning should be thrown
             assert cap_logger.out == ""
 
-            logger = logging.get_logger("diffusers.schedulers.schedulering_utils")
+            logger = logging.get_logger("diffusers.schedulers.scheduling_utils")
             # 30 for warning
             logger.setLevel(30)
             with CaptureLogger(logger) as cap_logger:

@@ -38,7 +38,7 @@ from ...models.resnet import Downsample2D, ResnetBlock2D, Upsample2D
 from ...models.transformers.transformer_2d import Transformer2DModel
 from ...models.unets.unet_2d_blocks import DownBlock2D, UpBlock2D
 from ...models.unets.unet_2d_condition import UNet2DConditionOutput
-from ...utils import BaseOutput, is_torch_version, logging
+from ...utils import BaseOutput, logging
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -64,7 +64,7 @@ class AudioLDM2ProjectionModelOutput(BaseOutput):
     """
     Args:
     Class for AudioLDM2 projection layer's outputs.
-        hidden_states (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+        hidden_states (`torch.Tensor` of shape `(batch_size, sequence_length, hidden_size)`):
             Sequence of hidden-states obtained by linearly projecting the hidden-states for each of the text
              encoders and subsequently concatenating them together.
         attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -75,7 +75,7 @@ class AudioLDM2ProjectionModelOutput(BaseOutput):
             - 0 for tokens that are **masked**.
     """
 
-    hidden_states: torch.FloatTensor
+    hidden_states: torch.Tensor
     attention_mask: Optional[torch.LongTensor] = None
 
 
@@ -95,7 +95,14 @@ class AudioLDM2ProjectionModel(ModelMixin, ConfigMixin):
     """
 
     @register_to_config
-    def __init__(self, text_encoder_dim, text_encoder_1_dim, langauge_model_dim):
+    def __init__(
+        self,
+        text_encoder_dim,
+        text_encoder_1_dim,
+        langauge_model_dim,
+        use_learned_position_embedding=None,
+        max_seq_length=None,
+    ):
         super().__init__()
         # additional projection layers for each text encoder
         self.projection = nn.Linear(text_encoder_dim, langauge_model_dim)
@@ -108,10 +115,18 @@ class AudioLDM2ProjectionModel(ModelMixin, ConfigMixin):
         self.sos_embed_1 = nn.Parameter(torch.ones(langauge_model_dim))
         self.eos_embed_1 = nn.Parameter(torch.ones(langauge_model_dim))
 
+        self.use_learned_position_embedding = use_learned_position_embedding
+
+        # learable positional embedding for vits encoder
+        if self.use_learned_position_embedding is not None:
+            self.learnable_positional_embedding = torch.nn.Parameter(
+                torch.zeros((1, text_encoder_1_dim, max_seq_length))
+            )
+
     def forward(
         self,
-        hidden_states: Optional[torch.FloatTensor] = None,
-        hidden_states_1: Optional[torch.FloatTensor] = None,
+        hidden_states: Optional[torch.Tensor] = None,
+        hidden_states_1: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
         attention_mask_1: Optional[torch.LongTensor] = None,
     ):
@@ -119,6 +134,10 @@ class AudioLDM2ProjectionModel(ModelMixin, ConfigMixin):
         hidden_states, attention_mask = add_special_tokens(
             hidden_states, attention_mask, sos_token=self.sos_embed, eos_token=self.eos_embed
         )
+
+        # Add positional embedding for Vits hidden state
+        if self.use_learned_position_embedding is not None:
+            hidden_states_1 = (hidden_states_1.permute(0, 2, 1) + self.learnable_positional_embedding).permute(0, 2, 1)
 
         hidden_states_1 = self.projection_1(hidden_states_1)
         hidden_states_1, attention_mask_1 = add_special_tokens(
@@ -525,7 +544,7 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
-                processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
+                processors[f"{name}.processor"] = module.get_processor()
 
             for sub_name, child in module.named_children():
                 fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
@@ -654,14 +673,9 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         for module in self.children():
             fn_recursive_set_attention_slice(module, reversed_slice_size)
 
-    # Copied from diffusers.models.unets.unet_2d_condition.UNet2DConditionModel._set_gradient_checkpointing
-    def _set_gradient_checkpointing(self, module, value=False):
-        if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
-
     def forward(
         self,
-        sample: torch.FloatTensor,
+        sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         class_labels: Optional[torch.Tensor] = None,
@@ -677,10 +691,10 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
         The [`AudioLDM2UNet2DConditionModel`] forward method.
 
         Args:
-            sample (`torch.FloatTensor`):
+            sample (`torch.Tensor`):
                 The noisy input tensor with the following shape `(batch, channel, height, width)`.
-            timestep (`torch.FloatTensor` or `float` or `int`): The number of timesteps to denoise an input.
-            encoder_hidden_states (`torch.FloatTensor`):
+            timestep (`torch.Tensor` or `float` or `int`): The number of timesteps to denoise an input.
+            encoder_hidden_states (`torch.Tensor`):
                 The encoder hidden states with shape `(batch, sequence_length, feature_dim)`.
             encoder_attention_mask (`torch.Tensor`):
                 A cross-attention mask of shape `(batch, sequence_length)` is applied to `encoder_hidden_states`. If
@@ -691,7 +705,7 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
                 tuple.
             cross_attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the [`AttnProcessor`].
-            encoder_hidden_states_1 (`torch.FloatTensor`, *optional*):
+            encoder_hidden_states_1 (`torch.Tensor`, *optional*):
                 A second set of encoder hidden states with shape `(batch, sequence_length_2, feature_dim_2)`. Can be
                 used to condition the model on a different set of embeddings to `encoder_hidden_states`.
             encoder_attention_mask_1 (`torch.Tensor`, *optional*):
@@ -701,8 +715,8 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
 
         Returns:
             [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] or `tuple`:
-                If `return_dict` is True, an [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] is returned, otherwise
-                a `tuple` is returned where the first element is the sample tensor.
+                If `return_dict` is True, an [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] is returned,
+                otherwise a `tuple` is returned where the first element is the sample tensor.
         """
         # By default samples have to be AT least a multiple of the overall upsampling factor.
         # The overall upsampling factor is equal to 2 ** (# num of upsampling layers).
@@ -749,10 +763,11 @@ class AudioLDM2UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoad
             # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
             # This would be a good case for the `match` statement (Python 3.10+)
             is_mps = sample.device.type == "mps"
+            is_npu = sample.device.type == "npu"
             if isinstance(timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
+                dtype = torch.float32 if (is_mps or is_npu) else torch.float64
             else:
-                dtype = torch.int32 if is_mps else torch.int64
+                dtype = torch.int32 if (is_mps or is_npu) else torch.int64
             timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
@@ -1072,14 +1087,14 @@ class CrossAttnDownBlock2D(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states_1: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask_1: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states_1: Optional[torch.Tensor] = None,
+        encoder_attention_mask_1: Optional[torch.Tensor] = None,
     ):
         output_states = ()
         num_layers = len(self.resnets)
@@ -1093,24 +1108,8 @@ class CrossAttnDownBlock2D(nn.Module):
         )
 
         for i in range(num_layers):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.resnets[i]),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(self.resnets[i], hidden_states, temb)
                 for idx, cross_attention_dim in enumerate(self.cross_attention_dim):
                     if cross_attention_dim is not None and idx <= 1:
                         forward_encoder_hidden_states = encoder_hidden_states
@@ -1121,8 +1120,8 @@ class CrossAttnDownBlock2D(nn.Module):
                     else:
                         forward_encoder_hidden_states = None
                         forward_encoder_attention_mask = None
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(self.attentions[i * num_attention_per_layer + idx], return_dict=False),
+                    hidden_states = self._gradient_checkpointing_func(
+                        self.attentions[i * num_attention_per_layer + idx],
                         hidden_states,
                         forward_encoder_hidden_states,
                         None,  # timestep
@@ -1130,7 +1129,6 @@ class CrossAttnDownBlock2D(nn.Module):
                         cross_attention_kwargs,
                         attention_mask,
                         forward_encoder_attention_mask,
-                        **ckpt_kwargs,
                     )[0]
             else:
                 hidden_states = self.resnets[i](hidden_states, temb)
@@ -1251,15 +1249,15 @@ class UNetMidBlock2DCrossAttn(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states_1: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask_1: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states_1: Optional[torch.Tensor] = None,
+        encoder_attention_mask_1: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         hidden_states = self.resnets[0](hidden_states, temb)
         num_attention_per_layer = len(self.attentions) // (len(self.resnets) - 1)
 
@@ -1271,18 +1269,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
         )
 
         for i in range(len(self.resnets[1:])):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
                 for idx, cross_attention_dim in enumerate(self.cross_attention_dim):
                     if cross_attention_dim is not None and idx <= 1:
                         forward_encoder_hidden_states = encoder_hidden_states
@@ -1293,8 +1280,8 @@ class UNetMidBlock2DCrossAttn(nn.Module):
                     else:
                         forward_encoder_hidden_states = None
                         forward_encoder_attention_mask = None
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(self.attentions[i * num_attention_per_layer + idx], return_dict=False),
+                    hidden_states = self._gradient_checkpointing_func(
+                        self.attentions[i * num_attention_per_layer + idx],
                         hidden_states,
                         forward_encoder_hidden_states,
                         None,  # timestep
@@ -1302,14 +1289,8 @@ class UNetMidBlock2DCrossAttn(nn.Module):
                         cross_attention_kwargs,
                         attention_mask,
                         forward_encoder_attention_mask,
-                        **ckpt_kwargs,
                     )[0]
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.resnets[i + 1]),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+                hidden_states = self._gradient_checkpointing_func(self.resnets[i + 1], hidden_states, temb)
             else:
                 for idx, cross_attention_dim in enumerate(self.cross_attention_dim):
                     if cross_attention_dim is not None and idx <= 1:
@@ -1418,16 +1399,16 @@ class CrossAttnUpBlock2D(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        res_hidden_states_tuple: Tuple[torch.FloatTensor, ...],
-        temb: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        hidden_states: torch.Tensor,
+        res_hidden_states_tuple: Tuple[torch.Tensor, ...],
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         upsample_size: Optional[int] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states_1: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask_1: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states_1: Optional[torch.Tensor] = None,
+        encoder_attention_mask_1: Optional[torch.Tensor] = None,
     ):
         num_layers = len(self.resnets)
         num_attention_per_layer = len(self.attentions) // num_layers
@@ -1445,24 +1426,8 @@ class CrossAttnUpBlock2D(nn.Module):
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.resnets[i]),
-                    hidden_states,
-                    temb,
-                    **ckpt_kwargs,
-                )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(self.resnets[i], hidden_states, temb)
                 for idx, cross_attention_dim in enumerate(self.cross_attention_dim):
                     if cross_attention_dim is not None and idx <= 1:
                         forward_encoder_hidden_states = encoder_hidden_states
@@ -1473,8 +1438,8 @@ class CrossAttnUpBlock2D(nn.Module):
                     else:
                         forward_encoder_hidden_states = None
                         forward_encoder_attention_mask = None
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(self.attentions[i * num_attention_per_layer + idx], return_dict=False),
+                    hidden_states = self._gradient_checkpointing_func(
+                        self.attentions[i * num_attention_per_layer + idx],
                         hidden_states,
                         forward_encoder_hidden_states,
                         None,  # timestep
@@ -1482,7 +1447,6 @@ class CrossAttnUpBlock2D(nn.Module):
                         cross_attention_kwargs,
                         attention_mask,
                         forward_encoder_attention_mask,
-                        **ckpt_kwargs,
                     )[0]
             else:
                 hidden_states = self.resnets[i](hidden_states, temb)

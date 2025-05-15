@@ -38,8 +38,6 @@ from ...models.attention_processor import (
     Attention,
     AttnProcessor,
     AttnProcessor2_0,
-    LoRAAttnProcessor2_0,
-    LoRAXFormersAttnProcessor,
     XFormersAttnProcessor,
 )
 from ...models.lora import adjust_lora_scale_text_encoder
@@ -74,36 +72,27 @@ EXAMPLE_DOC_STRING = """
     Examples:
         ```py
         >>> import torch
-        >>> import PIL
-        >>> import requests
-        >>> from io import BytesIO
 
         >>> from diffusers import LEditsPPPipelineStableDiffusionXL
+        >>> from diffusers.utils import load_image
 
         >>> pipe = LEditsPPPipelineStableDiffusionXL.from_pretrained(
-        ...     "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float16
+        ...     "stabilityai/stable-diffusion-xl-base-1.0", variant="fp16", torch_dtype=torch.float16
         ... )
+        >>> pipe.enable_vae_tiling()
         >>> pipe = pipe.to("cuda")
 
-        >>> def download_image(url):
-        ...     response = requests.get(url)
-        ...     return PIL.Image.open(BytesIO(response.content)).convert("RGB")
-
         >>> img_url = "https://www.aiml.informatik.tu-darmstadt.de/people/mbrack/tennis.jpg"
-        >>> image = download_image(img_url)
+        >>> image = load_image(img_url).resize((1024, 1024))
 
-        >>> _ = pipe.invert(
-        ...     image = image,
-        ...     num_inversion_steps=50,
-        ...     skip=0.2
-        ... )
+        >>> _ = pipe.invert(image=image, num_inversion_steps=50, skip=0.2)
 
         >>> edited_image = pipe(
-        ...     editing_prompt=["tennis ball","tomato"],
-        ...     reverse_editing_direction=[True,False],
-        ...     edit_guidance_scale=[5.0,10.0],
-        ...     edit_threshold=[0.9,0.85],
-        ).images[0]
+        ...     editing_prompt=["tennis ball", "tomato"],
+        ...     reverse_editing_direction=[True, False],
+        ...     edit_guidance_scale=[5.0, 10.0],
+        ...     edit_threshold=[0.9, 0.85],
+        ... ).images[0]
         ```
 """
 
@@ -201,7 +190,7 @@ class LeditsGaussianSmoothing:
 
         # The gaussian kernel is the product of the gaussian function of each dimension.
         kernel = 1
-        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
+        meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size], indexing="ij")
         for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
             mean = (size - 1) / 2
             kernel *= 1 / (std * math.sqrt(2 * math.pi)) * torch.exp(-(((mgrid - mean) / (2 * std)) ** 2))
@@ -292,9 +281,9 @@ class LEditsPPPipelineStableDiffusionXL(
     """
     Pipeline for textual image editing using LEDits++ with Stable Diffusion XL.
 
-    This model inherits from [`DiffusionPipeline`] and builds on the [`StableDiffusionXLPipeline`]. Check the superclass
-    documentation for the generic methods implemented for all pipelines (downloading, saving, running on a particular
-    device, etc.).
+    This model inherits from [`DiffusionPipeline`] and builds on the [`StableDiffusionXLPipeline`]. Check the
+    superclass documentation for the generic methods implemented for all pipelines (downloading, saving, running on a
+    particular device, etc.).
 
     In addition the pipeline inherits the following loading methods:
         - *LoRA*: [`LEditsPPPipelineStableDiffusionXL.load_lora_weights`]
@@ -325,8 +314,8 @@ class LEditsPPPipelineStableDiffusionXL(
         unet ([`UNet2DConditionModel`]): Conditional U-Net architecture to denoise the encoded image latents.
         scheduler ([`DPMSolverMultistepScheduler`] or [`DDIMScheduler`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latens. Can be one of
-            [`DPMSolverMultistepScheduler`] or [`DDIMScheduler`]. If any other scheduler is passed it will automatically
-            be set to [`DPMSolverMultistepScheduler`].
+            [`DPMSolverMultistepScheduler`] or [`DDIMScheduler`]. If any other scheduler is passed it will
+            automatically be set to [`DPMSolverMultistepScheduler`].
         force_zeros_for_empty_prompt (`bool`, *optional*, defaults to `"True"`):
             Whether the negative prompt embeddings shall be forced to always be set to 0. Also see the config of
             `stabilityai/stable-diffusion-xl-base-1-0`.
@@ -383,7 +372,7 @@ class LEditsPPPipelineStableDiffusionXL(
             feature_extractor=feature_extractor,
         )
         self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
         if not isinstance(scheduler, DDIMScheduler) and not isinstance(scheduler, DPMSolverMultistepScheduler):
@@ -395,7 +384,11 @@ class LEditsPPPipelineStableDiffusionXL(
                 "The scheduler has been changed to DPMSolverMultistepScheduler."
             )
 
-        self.default_sample_size = self.unet.config.sample_size
+        self.default_sample_size = (
+            self.unet.config.sample_size
+            if hasattr(self, "unet") and self.unet is not None and hasattr(self.unet.config, "sample_size")
+            else 128
+        )
 
         add_watermarker = add_watermarker if add_watermarker is not None else is_invisible_watermark_available()
 
@@ -411,14 +404,14 @@ class LEditsPPPipelineStableDiffusionXL(
         num_images_per_prompt: int = 1,
         negative_prompt: Optional[str] = None,
         negative_prompt_2: Optional[str] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         lora_scale: Optional[float] = None,
         clip_skip: Optional[int] = None,
         enable_edit_guidance: bool = True,
         editing_prompt: Optional[str] = None,
-        editing_prompt_embeds: Optional[torch.FloatTensor] = None,
-        editing_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        editing_prompt_embeds: Optional[torch.Tensor] = None,
+        editing_pooled_prompt_embeds: Optional[torch.Tensor] = None,
     ) -> object:
         r"""
         Encodes the prompt into text encoder hidden states.
@@ -434,11 +427,11 @@ class LEditsPPPipelineStableDiffusionXL(
             negative_prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
                 `text_encoder_2`. If not defined, `negative_prompt` is used in both text-encoders
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -452,11 +445,11 @@ class LEditsPPPipelineStableDiffusionXL(
             editing_prompt (`str` or `List[str]`, *optional*):
                 Editing prompt(s) to be encoded. If not defined and 'enable_edit_guidance' is True, one has to pass
                 `editing_prompt_embeds` instead.
-            editing_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated edit text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided and 'enable_edit_guidance' is True, editing_prompt_embeds will be generated from `editing_prompt` input
-                argument.
-            editing_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            editing_prompt_embeds (`torch.Tensor`, *optional*):
+                Pre-generated edit text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
+                If not provided and 'enable_edit_guidance' is True, editing_prompt_embeds will be generated from
+                `editing_prompt` input argument.
+            editing_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated edit pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled editing_pooled_prompt_embeds will be generated from `editing_prompt`
                 input argument.
@@ -701,8 +694,6 @@ class LEditsPPPipelineStableDiffusionXL(
             (
                 AttnProcessor2_0,
                 XFormersAttnProcessor,
-                LoRAXFormersAttnProcessor,
-                LoRAAttnProcessor2_0,
             ),
         )
         # if xformers or torch_2_0 is used attention block does not need
@@ -713,20 +704,22 @@ class LEditsPPPipelineStableDiffusionXL(
             self.vae.decoder.mid_block.to(dtype)
 
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
-    def get_guidance_scale_embedding(self, w, embedding_dim=512, dtype=torch.float32):
+    def get_guidance_scale_embedding(
+        self, w: torch.Tensor, embedding_dim: int = 512, dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
         """
         See https://github.com/google-research/vdm/blob/dc27b98a554f65cdc654b800da5aa1846545d41b/model_vdm.py#L298
 
         Args:
-            timesteps (`torch.Tensor`):
-                generate embedding vectors at these timesteps
+            w (`torch.Tensor`):
+                Generate embedding vectors with a specified guidance scale to subsequently enrich timestep embeddings.
             embedding_dim (`int`, *optional*, defaults to 512):
-                dimension of the embeddings to generate
-            dtype:
-                data type of the generated embeddings
+                Dimension of the embeddings to generate.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float32`):
+                Data type of the generated embeddings.
 
         Returns:
-            `torch.FloatTensor`: Embedding vectors with shape `(len(timesteps), embedding_dim)`
+            `torch.Tensor`: Embedding vectors with shape `(len(w), embedding_dim)`.
         """
         assert len(w.shape) == 1
         w = w * 1000.0
@@ -772,6 +765,35 @@ class LEditsPPPipelineStableDiffusionXL(
     def num_timesteps(self):
         return self._num_timesteps
 
+    def enable_vae_slicing(self):
+        r"""
+        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
+        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
+        """
+        self.vae.enable_slicing()
+
+    def disable_vae_slicing(self):
+        r"""
+        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
+        computing decoding in one step.
+        """
+        self.vae.disable_slicing()
+
+    def enable_vae_tiling(self):
+        r"""
+        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
+        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
+        processing larger images.
+        """
+        self.vae.enable_tiling()
+
+    def disable_vae_tiling(self):
+        r"""
+        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
+        computing decoding in one step.
+        """
+        self.vae.disable_tiling()
+
     # Copied from diffusers.pipelines.ledits_pp.pipeline_leditspp_stable_diffusion.LEditsPPPipelineStableDiffusion.prepare_unet
     def prepare_unet(self, attention_store, PnP: bool = False):
         attn_procs = {}
@@ -804,8 +826,8 @@ class LEditsPPPipelineStableDiffusionXL(
         denoising_end: Optional[float] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
         ip_adapter_image: Optional[PipelineImageInput] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -824,7 +846,7 @@ class LEditsPPPipelineStableDiffusionXL(
         sem_guidance: Optional[List[torch.Tensor]] = None,
         use_cross_attn_mask: bool = False,
         use_intersect_mask: bool = False,
-        user_mask: Optional[torch.FloatTensor] = None,
+        user_mask: Optional[torch.Tensor] = None,
         attn_store_steps: Optional[List[int]] = [],
         store_averaged_over_steps: bool = True,
         clip_skip: Optional[int] = None,
@@ -833,8 +855,9 @@ class LEditsPPPipelineStableDiffusionXL(
         **kwargs,
     ):
         r"""
-        The call function to the pipeline for editing. The [`~pipelines.ledits_pp.LEditsPPPipelineStableDiffusionXL.invert`]
-        method has to be called beforehand. Edits will always be performed for the last inverted image(s).
+        The call function to the pipeline for editing. The
+        [`~pipelines.ledits_pp.LEditsPPPipelineStableDiffusionXL.invert`] method has to be called beforehand. Edits
+        will always be performed for the last inverted image(s).
 
         Args:
             denoising_end (`float`, *optional*):
@@ -850,11 +873,11 @@ class LEditsPPPipelineStableDiffusionXL(
             negative_prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
                 `text_encoder_2`. If not defined, `negative_prompt` is used in both text-encoders
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_pooled_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
                 input argument.
@@ -868,7 +891,7 @@ class LEditsPPPipelineStableDiffusionXL(
                 of a plain tuple.
             callback (`Callable`, *optional*):
                 A function that will be called every `callback_steps` steps during inference. The function will be
-                called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                called with the following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function will be called. If not specified, the callback will be
                 called at every step.
@@ -892,11 +915,11 @@ class LEditsPPPipelineStableDiffusionXL(
                 section 2.2 of [https://huggingface.co/papers/2307.01952](https://huggingface.co/papers/2307.01952).
             editing_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. The image is reconstructed by setting
-                `editing_prompt = None`. Guidance direction of prompt should be specified via `reverse_editing_direction`.
+                `editing_prompt = None`. Guidance direction of prompt should be specified via
+                `reverse_editing_direction`.
             editing_prompt_embeddings (`torch.Tensor`, *optional*):
-                Pre-generated edit text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, editing_prompt_embeddings will be generated from `editing_prompt` input
-                argument.
+                Pre-generated edit text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
+                If not provided, editing_prompt_embeddings will be generated from `editing_prompt` input argument.
             editing_pooled_prompt_embeddings (`torch.Tensor`, *optional*):
                 Pre-generated pooled edit text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, editing_prompt_embeddings will be generated from `editing_prompt` input
@@ -904,35 +927,36 @@ class LEditsPPPipelineStableDiffusionXL(
             reverse_editing_direction (`bool` or `List[bool]`, *optional*, defaults to `False`):
                 Whether the corresponding prompt in `editing_prompt` should be increased or decreased.
             edit_guidance_scale (`float` or `List[float]`, *optional*, defaults to 5):
-                Guidance scale for guiding the image generation. If provided as list values should correspond to `editing_prompt`.
-                `edit_guidance_scale` is defined as `s_e` of equation 12 of
-                [LEDITS++ Paper](https://arxiv.org/abs/2301.12247).
+                Guidance scale for guiding the image generation. If provided as list values should correspond to
+                `editing_prompt`. `edit_guidance_scale` is defined as `s_e` of equation 12 of [LEDITS++
+                Paper](https://arxiv.org/abs/2301.12247).
             edit_warmup_steps (`float` or `List[float]`, *optional*, defaults to 10):
                 Number of diffusion steps (for each prompt) for which guidance is not applied.
             edit_cooldown_steps (`float` or `List[float]`, *optional*, defaults to `None`):
                 Number of diffusion steps (for each prompt) after which guidance is no longer applied.
             edit_threshold (`float` or `List[float]`, *optional*, defaults to 0.9):
                 Masking threshold of guidance. Threshold should be proportional to the image region that is modified.
-                'edit_threshold' is defined as 'λ' of equation 12 of [LEDITS++ Paper](https://arxiv.org/abs/2301.12247).
+                'edit_threshold' is defined as 'λ' of equation 12 of [LEDITS++
+                Paper](https://arxiv.org/abs/2301.12247).
             sem_guidance (`List[torch.Tensor]`, *optional*):
                 List of pre-generated guidance vectors to be applied at generation. Length of the list has to
                 correspond to `num_inference_steps`.
             use_cross_attn_mask:
                 Whether cross-attention masks are used. Cross-attention masks are always used when use_intersect_mask
-                is set to true. Cross-attention masks are defined as 'M^1' of equation 12 of
-                [LEDITS++ paper](https://arxiv.org/pdf/2311.16711.pdf).
+                is set to true. Cross-attention masks are defined as 'M^1' of equation 12 of [LEDITS++
+                paper](https://arxiv.org/pdf/2311.16711.pdf).
             use_intersect_mask:
-                Whether the masking term is calculated as intersection of cross-attention masks and masks derived
-                from the noise estimate. Cross-attention mask are defined as 'M^1' and masks derived from the noise
-                estimate are defined as 'M^2' of equation 12 of [LEDITS++ paper](https://arxiv.org/pdf/2311.16711.pdf).
+                Whether the masking term is calculated as intersection of cross-attention masks and masks derived from
+                the noise estimate. Cross-attention mask are defined as 'M^1' and masks derived from the noise estimate
+                are defined as 'M^2' of equation 12 of [LEDITS++ paper](https://arxiv.org/pdf/2311.16711.pdf).
             user_mask:
-                User-provided mask for even better control over the editing process. This is helpful when LEDITS++'s implicit
-                masks do not meet user preferences.
+                User-provided mask for even better control over the editing process. This is helpful when LEDITS++'s
+                implicit masks do not meet user preferences.
             attn_store_steps:
                 Steps for which the attention maps are stored in the AttentionStore. Just for visualization purposes.
             store_averaged_over_steps:
-                Whether the attention maps for the 'attn_store_steps' are stored averaged over the diffusion steps.
-                If False, attention maps for each step are stores separately. Just for visualization purposes.
+                Whether the attention maps for the 'attn_store_steps' are stored averaged over the diffusion steps. If
+                False, attention maps for each step are stores separately. Just for visualization purposes.
             clip_skip (`int`, *optional*):
                 Number of layers to be skipped from CLIP while computing the prompt embeddings. A value of 1 means that
                 the output of the pre-final layer will be used for computing the prompt embeddings.
@@ -950,8 +974,8 @@ class LEditsPPPipelineStableDiffusionXL(
 
         Returns:
             [`~pipelines.ledits_pp.LEditsPPDiffusionPipelineOutput`] or `tuple`:
-            [`~pipelines.ledits_pp.LEditsPPDiffusionPipelineOutput`] if `return_dict` is True,
-            otherwise a `tuple. When returning a tuple, the first element is a list with the generated images.
+            [`~pipelines.ledits_pp.LEditsPPDiffusionPipelineOutput`] if `return_dict` is True, otherwise a `tuple. When
+            returning a tuple, the first element is a list with the generated images.
         """
         if self.inversion_steps is None:
             raise ValueError(
@@ -1403,6 +1427,12 @@ class LEditsPPPipelineStableDiffusionXL(
         image = self.image_processor.preprocess(
             image=image, height=height, width=width, resize_mode=resize_mode, crops_coords=crops_coords
         )
+        height, width = image.shape[-2:]
+        if height % 32 != 0 or width % 32 != 0:
+            raise ValueError(
+                "Image height and width must be a factor of 32. "
+                "Consider down-sampling the input using the `height` and `width` parameters"
+            )
         resized = self.image_processor.postprocess(image=image, output_type="pil")
 
         if max(image.shape[-2:]) > self.vae.config["sample_size"] * 1.5:
@@ -1417,7 +1447,6 @@ class LEditsPPPipelineStableDiffusionXL(
         if needs_upcasting:
             image = image.float()
             self.upcast_vae()
-            image = image.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
 
         x0 = self.vae.encode(image).latent_dist.mode()
         x0 = x0.to(dtype)
@@ -1442,13 +1471,17 @@ class LEditsPPPipelineStableDiffusionXL(
         crops_coords_top_left: Tuple[int, int] = (0, 0),
         num_zero_noise_steps: int = 3,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        resize_mode: Optional[str] = "default",
+        crops_coords: Optional[Tuple[int, int, int, int]] = None,
     ):
         r"""
-        The function to the pipeline for image inversion as described by the [LEDITS++ Paper](https://arxiv.org/abs/2301.12247).
-        If the scheduler is set to [`~schedulers.DDIMScheduler`] the inversion proposed by [edit-friendly DPDM](https://arxiv.org/abs/2304.06140)
-        will be performed instead.
+        The function to the pipeline for image inversion as described by the [LEDITS++
+        Paper](https://arxiv.org/abs/2301.12247). If the scheduler is set to [`~schedulers.DDIMScheduler`] the
+        inversion proposed by [edit-friendly DPDM](https://arxiv.org/abs/2304.06140) will be performed instead.
 
-         Args:
+        Args:
             image (`PipelineImageInput`):
                 Input for the image(s) that are to be edited. Multiple input images have to default to the same aspect
                 ratio.
@@ -1470,8 +1503,8 @@ class LEditsPPPipelineStableDiffusionXL(
                 Portion of initial steps that will be ignored for inversion and subsequent generation. Lower values
                 will lead to stronger changes to the input image. `skip` has to be between `0` and `1`.
             generator (`torch.Generator`, *optional*):
-                A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
-                inversion deterministic.
+                A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make inversion
+                deterministic.
             crops_coords_top_left (`Tuple[int]`, *optional*, defaults to (0, 0)):
                 `crops_coords_top_left` can be used to generate an image that appears to be "cropped" from the position
                 `crops_coords_top_left` downwards. Favorable, well-centered images are usually achieved by setting
@@ -1486,9 +1519,11 @@ class LEditsPPPipelineStableDiffusionXL(
                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
 
         Returns:
-            [`~pipelines.ledits_pp.LEditsPPInversionPipelineOutput`]:
-            Output will contain the resized input image(s) and respective VAE reconstruction(s).
+            [`~pipelines.ledits_pp.LEditsPPInversionPipelineOutput`]: Output will contain the resized input image(s)
+            and respective VAE reconstruction(s).
         """
+        if height is not None and height % 32 != 0 or width is not None and width % 32 != 0:
+            raise ValueError("height and width must be a factor of 32.")
 
         # Reset attn processor, we do not want to store attn maps during inversion
         self.unet.set_attn_processor(AttnProcessor())
@@ -1513,7 +1548,14 @@ class LEditsPPPipelineStableDiffusionXL(
             do_classifier_free_guidance = source_guidance_scale > 1.0
 
         # 1. prepare image
-        x0, resized = self.encode_image(image, dtype=self.text_encoder_2.dtype)
+        x0, resized = self.encode_image(
+            image,
+            dtype=self.text_encoder_2.dtype,
+            height=height,
+            width=width,
+            resize_mode=resize_mode,
+            crops_coords=crops_coords,
+        )
         width = x0.shape[2] * self.vae_scale_factor
         height = x0.shape[3] * self.vae_scale_factor
         self.size = (height, width)
@@ -1646,9 +1688,21 @@ class LEditsPPPipelineStableDiffusionXL(
 
 # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.rescale_noise_cfg
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
-    """
-    Rescale `noise_cfg` according to `guidance_rescale`. Based on findings of [Common Diffusion Noise Schedules and
-    Sample Steps are Flawed](https://arxiv.org/pdf/2305.08891.pdf). See Section 3.4
+    r"""
+    Rescales `noise_cfg` tensor based on `guidance_rescale` to improve image quality and fix overexposure. Based on
+    Section 3.4 from [Common Diffusion Noise Schedules and Sample Steps are
+    Flawed](https://arxiv.org/pdf/2305.08891.pdf).
+
+    Args:
+        noise_cfg (`torch.Tensor`):
+            The predicted noise tensor for the guided diffusion process.
+        noise_pred_text (`torch.Tensor`):
+            The predicted noise tensor for the text-guided diffusion process.
+        guidance_rescale (`float`, *optional*, defaults to 0.0):
+            A rescale factor applied to the noise predictions.
+
+    Returns:
+        noise_cfg (`torch.Tensor`): The rescaled noise prediction tensor.
     """
     std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
     std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
@@ -1688,7 +1742,7 @@ def compute_noise_ddim(scheduler, prev_latents, latents, timestep, noise_pred, e
     # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
     pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * noise_pred
 
-    # modifed so that updated xtm1 is returned as well (to avoid error accumulation)
+    # modified so that updated xtm1 is returned as well (to avoid error accumulation)
     mu_xt = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
     if variance > 0.0:
         noise = (prev_latents - mu_xt) / (variance ** (0.5) * eta)

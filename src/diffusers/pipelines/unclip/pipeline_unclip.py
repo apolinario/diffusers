@@ -22,11 +22,18 @@ from transformers.models.clip.modeling_clip import CLIPTextModelOutput
 
 from ...models import PriorTransformer, UNet2DConditionModel, UNet2DModel
 from ...schedulers import UnCLIPScheduler
-from ...utils import logging
+from ...utils import is_torch_xla_available, logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from .text_proj import UnCLIPTextProjModel
 
+
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -217,9 +224,9 @@ class UnCLIPPipeline(DiffusionPipeline):
         decoder_num_inference_steps: int = 25,
         super_res_num_inference_steps: int = 7,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        prior_latents: Optional[torch.FloatTensor] = None,
-        decoder_latents: Optional[torch.FloatTensor] = None,
-        super_res_latents: Optional[torch.FloatTensor] = None,
+        prior_latents: Optional[torch.Tensor] = None,
+        decoder_latents: Optional[torch.Tensor] = None,
+        super_res_latents: Optional[torch.Tensor] = None,
         text_model_output: Optional[Union[CLIPTextModelOutput, Tuple]] = None,
         text_attention_mask: Optional[torch.Tensor] = None,
         prior_guidance_scale: float = 4.0,
@@ -248,11 +255,11 @@ class UnCLIPPipeline(DiffusionPipeline):
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
                 generation deterministic.
-            prior_latents (`torch.FloatTensor` of shape (batch size, embeddings dimension), *optional*):
+            prior_latents (`torch.Tensor` of shape (batch size, embeddings dimension), *optional*):
                 Pre-generated noisy latents to be used as inputs for the prior.
-            decoder_latents (`torch.FloatTensor` of shape (batch size, channels, height, width), *optional*):
+            decoder_latents (`torch.Tensor` of shape (batch size, channels, height, width), *optional*):
                 Pre-generated noisy latents to be used as inputs for the decoder.
-            super_res_latents (`torch.FloatTensor` of shape (batch size, channels, super res height, super res width), *optional*):
+            super_res_latents (`torch.Tensor` of shape (batch size, channels, super res height, super res width), *optional*):
                 Pre-generated noisy latents to be used as inputs for the decoder.
             prior_guidance_scale (`float`, *optional*, defaults to 4.0):
                 A higher guidance scale value encourages the model to generate images closely linked to the text
@@ -473,6 +480,9 @@ class UnCLIPPipeline(DiffusionPipeline):
             super_res_latents = self.super_res_scheduler.step(
                 noise_pred, t, super_res_latents, prev_timestep=prev_timestep, generator=generator
             ).prev_sample
+
+            if XLA_AVAILABLE:
+                xm.mark_step()
 
         image = super_res_latents
         # done super res

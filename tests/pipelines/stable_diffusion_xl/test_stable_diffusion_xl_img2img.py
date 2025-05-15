@@ -32,18 +32,17 @@ from transformers import (
 from diffusers import (
     AutoencoderKL,
     AutoencoderTiny,
-    DDIMScheduler,
+    EDMDPMSolverMultistepScheduler,
     EulerDiscreteScheduler,
     LCMScheduler,
     StableDiffusionXLImg2ImgPipeline,
     UNet2DConditionModel,
 )
-from diffusers.utils import load_image
 from diffusers.utils.testing_utils import (
     enable_full_determinism,
     floats_tensor,
-    numpy_cosine_similarity_distance,
-    require_torch_gpu,
+    load_image,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -58,7 +57,6 @@ from ..test_pipelines_common import (
     IPAdapterTesterMixin,
     PipelineLatentTesterMixin,
     PipelineTesterMixin,
-    SDXLOptionalComponentsTesterMixin,
 )
 
 
@@ -77,6 +75,8 @@ class StableDiffusionXLImg2ImgPipelineFastTests(
     callback_cfg_params = TEXT_TO_IMAGE_CALLBACK_CFG_PARAMS.union(
         {"add_text_embeds", "add_time_ids", "add_neg_time_ids"}
     )
+
+    supports_dduf = False
 
     def get_dummy_components(self, skip_first_text_encoder=False, time_cond_proj_dim=None):
         torch.manual_seed(0)
@@ -265,51 +265,16 @@ class StableDiffusionXLImg2ImgPipelineFastTests(
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(expected_max_diff=3e-3)
 
-    # TODO(Patrick, Sayak) - skip for now as this requires more refiner tests
+    @unittest.skip("Skip for now.")
     def test_save_load_optional_components(self):
         pass
 
-    def test_stable_diffusion_xl_img2img_negative_prompt_embeds(self):
-        components = self.get_dummy_components()
-        sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe.set_progress_bar_config(disable=None)
+    def test_ip_adapter(self):
+        expected_pipe_slice = None
+        if torch_device == "cpu":
+            expected_pipe_slice = np.array([0.5133, 0.4626, 0.4970, 0.6273, 0.5160, 0.6891, 0.6639, 0.5892, 0.5709])
 
-        # forward without prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        negative_prompt = 3 * ["this is a negative prompt"]
-        inputs["negative_prompt"] = negative_prompt
-        inputs["prompt"] = 3 * [inputs["prompt"]]
-
-        output = sd_pipe(**inputs)
-        image_slice_1 = output.images[0, -3:, -3:, -1]
-
-        # forward with prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        negative_prompt = 3 * ["this is a negative prompt"]
-        prompt = 3 * [inputs.pop("prompt")]
-
-        (
-            prompt_embeds,
-            negative_prompt_embeds,
-            pooled_prompt_embeds,
-            negative_pooled_prompt_embeds,
-        ) = sd_pipe.encode_prompt(prompt, negative_prompt=negative_prompt)
-
-        output = sd_pipe(
-            **inputs,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-        )
-        image_slice_2 = output.images[0, -3:, -3:, -1]
-
-        # make sure that it's equal
-        assert np.abs(image_slice_1.flatten() - image_slice_2.flatten()).max() < 1e-4
+        return super().test_ip_adapter(expected_pipe_slice=expected_pipe_slice)
 
     def test_stable_diffusion_xl_img2img_tiny_autoencoder(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
@@ -328,7 +293,7 @@ class StableDiffusionXLImg2ImgPipelineFastTests(
 
         assert np.allclose(image_slice, expected_slice, atol=1e-4, rtol=1e-4)
 
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_stable_diffusion_xl_offloads(self):
         pipes = []
         components = self.get_dummy_components()
@@ -337,12 +302,12 @@ class StableDiffusionXLImg2ImgPipelineFastTests(
 
         components = self.get_dummy_components()
         sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe.enable_model_cpu_offload()
+        sd_pipe.enable_model_cpu_offload(device=torch_device)
         pipes.append(sd_pipe)
 
         components = self.get_dummy_components()
         sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe.enable_sequential_cpu_offload()
+        sd_pipe.enable_sequential_cpu_offload(device=torch_device)
         pipes.append(sd_pipe)
 
         image_slices = []
@@ -511,7 +476,7 @@ class StableDiffusionXLImg2ImgPipelineFastTests(
 
 
 class StableDiffusionXLImg2ImgRefinerOnlyPipelineFastTests(
-    PipelineLatentTesterMixin, PipelineTesterMixin, SDXLOptionalComponentsTesterMixin, unittest.TestCase
+    PipelineLatentTesterMixin, PipelineTesterMixin, unittest.TestCase
 ):
     pipeline_class = StableDiffusionXLImg2ImgPipeline
     params = TEXT_GUIDED_IMAGE_VARIATION_PARAMS - {"height", "width"}
@@ -631,7 +596,7 @@ class StableDiffusionXLImg2ImgRefinerOnlyPipelineFastTests(
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_stable_diffusion_xl_offloads(self):
         pipes = []
         components = self.get_dummy_components()
@@ -640,12 +605,12 @@ class StableDiffusionXLImg2ImgRefinerOnlyPipelineFastTests(
 
         components = self.get_dummy_components()
         sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe.enable_model_cpu_offload()
+        sd_pipe.enable_model_cpu_offload(device=torch_device)
         pipes.append(sd_pipe)
 
         components = self.get_dummy_components()
         sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe.enable_sequential_cpu_offload()
+        sd_pipe.enable_sequential_cpu_offload(device=torch_device)
         pipes.append(sd_pipe)
 
         image_slices = []
@@ -689,164 +654,63 @@ class StableDiffusionXLImg2ImgRefinerOnlyPipelineFastTests(
             > 1e-4
         )
 
-    def test_stable_diffusion_xl_img2img_negative_prompt_embeds(self):
-        components = self.get_dummy_components()
-        sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe.set_progress_bar_config(disable=None)
-
-        # forward without prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        negative_prompt = 3 * ["this is a negative prompt"]
-        inputs["negative_prompt"] = negative_prompt
-        inputs["prompt"] = 3 * [inputs["prompt"]]
-
-        output = sd_pipe(**inputs)
-        image_slice_1 = output.images[0, -3:, -3:, -1]
-
-        # forward with prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        negative_prompt = 3 * ["this is a negative prompt"]
-        prompt = 3 * [inputs.pop("prompt")]
-
-        (
-            prompt_embeds,
-            negative_prompt_embeds,
-            pooled_prompt_embeds,
-            negative_pooled_prompt_embeds,
-        ) = sd_pipe.encode_prompt(prompt, negative_prompt=negative_prompt)
-
-        output = sd_pipe(
-            **inputs,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-        )
-        image_slice_2 = output.images[0, -3:, -3:, -1]
-
-        # make sure that it's equal
-        assert np.abs(image_slice_1.flatten() - image_slice_2.flatten()).max() < 1e-4
-
-    def test_stable_diffusion_xl_img2img_prompt_embeds_only(self):
-        components = self.get_dummy_components()
-        sd_pipe = StableDiffusionXLImg2ImgPipeline(**components)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe.set_progress_bar_config(disable=None)
-
-        # forward without prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        inputs["prompt"] = 3 * [inputs["prompt"]]
-
-        output = sd_pipe(**inputs)
-        image_slice_1 = output.images[0, -3:, -3:, -1]
-
-        # forward with prompt embeds
-        generator_device = "cpu"
-        inputs = self.get_dummy_inputs(generator_device)
-        prompt = 3 * [inputs.pop("prompt")]
-
-        (
-            prompt_embeds,
-            _,
-            pooled_prompt_embeds,
-            _,
-        ) = sd_pipe.encode_prompt(prompt)
-
-        output = sd_pipe(
-            **inputs,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-        )
-        image_slice_2 = output.images[0, -3:, -3:, -1]
-
-        # make sure that it's equal
-        assert np.abs(image_slice_1.flatten() - image_slice_2.flatten()).max() < 1e-4
-
     def test_attention_slicing_forward_pass(self):
         super().test_attention_slicing_forward_pass(expected_max_diff=3e-3)
 
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(expected_max_diff=3e-3)
 
+    @unittest.skip("We test this functionality elsewhere already.")
     def test_save_load_optional_components(self):
-        self._test_save_load_optional_components()
+        pass
 
 
 @slow
-class StableDiffusionXLImg2ImgIntegrationTests(unittest.TestCase):
+class StableDiffusionXLImg2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
         torch.cuda.empty_cache()
 
-    def test_download_ckpt_diff_format_is_same(self):
-        ckpt_path = "https://huggingface.co/stabilityai/stable-diffusion-xl-refiner-1.0/blob/main/sd_xl_refiner_1.0.safetensors"
-        init_image = load_image(
-            "https://huggingface.co/datasets/diffusers/test-arrays/resolve/main"
-            "/stable_diffusion_img2img/sketch-mountains-input.png"
+    def test_stable_diffusion_xl_img2img_playground(self):
+        torch.manual_seed(0)
+        model_path = "playgroundai/playground-v2.5-1024px-aesthetic"
+
+        sd_pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            model_path, torch_dtype=torch.float16, variant="fp16", add_watermarker=False
         )
 
-        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            "stabilityai/stable-diffusion-xl-refiner-1.0", torch_dtype=torch.float16
+        sd_pipe.enable_model_cpu_offload()
+        sd_pipe.scheduler = EDMDPMSolverMultistepScheduler.from_config(
+            sd_pipe.scheduler.config, use_karras_sigmas=True
         )
-        pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-        pipe.unet.set_default_attn_processor()
-        pipe.enable_model_cpu_offload()
+        sd_pipe.set_progress_bar_config(disable=None)
 
-        generator = torch.Generator(device="cpu").manual_seed(0)
-        image = pipe(
-            prompt="mountains", image=init_image, num_inference_steps=5, generator=generator, output_type="np"
-        ).images[0]
+        prompt = "a photo of an astronaut riding a horse on mars"
 
-        pipe_single_file = StableDiffusionXLImg2ImgPipeline.from_single_file(ckpt_path, torch_dtype=torch.float16)
-        pipe_single_file.scheduler = DDIMScheduler.from_config(pipe_single_file.scheduler.config)
-        pipe_single_file.unet.set_default_attn_processor()
-        pipe_single_file.enable_model_cpu_offload()
+        url = "https://huggingface.co/datasets/patrickvonplaten/images/resolve/main/aa_xl/000000009.png"
 
-        generator = torch.Generator(device="cpu").manual_seed(0)
-        image_single_file = pipe_single_file(
-            prompt="mountains", image=init_image, num_inference_steps=5, generator=generator, output_type="np"
-        ).images[0]
+        init_image = load_image(url).convert("RGB")
 
-        max_diff = numpy_cosine_similarity_distance(image.flatten(), image_single_file.flatten())
+        image = sd_pipe(
+            prompt,
+            num_inference_steps=30,
+            guidance_scale=8.0,
+            image=init_image,
+            height=1024,
+            width=1024,
+            output_type="np",
+        ).images
 
-        assert max_diff < 5e-2
+        image_slice = image[0, -3:, -3:, -1]
 
-    def test_single_file_component_configs(self):
-        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-            "stabilityai/stable-diffusion-xl-refiner-1.0",
-            torch_dtype=torch.float16,
-            variant="fp16",
-        )
-        ckpt_path = "https://huggingface.co/stabilityai/stable-diffusion-xl-refiner-1.0/blob/main/sd_xl_refiner_1.0.safetensors"
-        single_file_pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(ckpt_path, torch_dtype=torch.float16)
+        assert image.shape == (1, 1024, 1024, 3)
 
-        assert pipe.text_encoder is None
-        assert single_file_pipe.text_encoder is None
+        expected_slice = np.array([0.3519, 0.3149, 0.3364, 0.3505, 0.3402, 0.3371, 0.3554, 0.3495, 0.3333])
 
-        for param_name, param_value in single_file_pipe.text_encoder_2.config.to_dict().items():
-            if param_name in ["torch_dtype", "architectures", "_name_or_path"]:
-                continue
-            assert pipe.text_encoder_2.config.to_dict()[param_name] == param_value
-
-        PARAMS_TO_IGNORE = ["torch_dtype", "_name_or_path", "architectures", "_use_default_values"]
-        for param_name, param_value in single_file_pipe.unet.config.items():
-            if param_name in PARAMS_TO_IGNORE:
-                continue
-            if param_name == "upcast_attention" and pipe.unet.config[param_name] is None:
-                pipe.unet.config[param_name] = False
-            assert (
-                pipe.unet.config[param_name] == param_value
-            ), f"{param_name} is differs between single file loading and pretrained loading"
-
-        for param_name, param_value in single_file_pipe.vae.config.items():
-            if param_name in PARAMS_TO_IGNORE:
-                continue
-            assert (
-                pipe.vae.config[param_name] == param_value
-            ), f"{param_name} differs between single file loading and pretrained loading"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2

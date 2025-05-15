@@ -327,7 +327,7 @@ class DreamBoothDataset(Dataset):
 
 
 class PromptDataset(Dataset):
-    "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
+    """A simple dataset to prepare the prompts to generate class images on multiple GPUs."""
 
     def __init__(self, prompt, num_samples):
         self.prompt = prompt
@@ -619,7 +619,7 @@ def main(args):
 
             optimizer.step()
             lr_scheduler.step()
-            logger.info(f"max GPU_mem cost is {torch.cuda.max_memory_allocated()/2**20} MB", ranks=[0])
+            logger.info(f"max GPU_mem cost is {torch.cuda.max_memory_allocated() / 2**20} MB", ranks=[0])
             # Checks if the accelerator has performed an optimization step behind the scenes
             progress_bar.update(1)
             global_step += 1

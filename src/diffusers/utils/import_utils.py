@@ -16,16 +16,16 @@ Import utilities: Utilities related to imports and our lazy inits.
 """
 
 import importlib.util
+import inspect
 import operator as op
 import os
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from itertools import chain
 from types import ModuleType
-from typing import Any, Union
+from typing import Any, Tuple, Union
 
 from huggingface_hub.utils import is_jinja_available  # noqa: F401
-from packaging import version
 from packaging.version import Version, parse
 
 from . import logging
@@ -36,7 +36,10 @@ if sys.version_info < (3, 8):
     import importlib_metadata
 else:
     import importlib.metadata as importlib_metadata
-
+try:
+    _package_map = importlib_metadata.packages_distributions()  # load-once to avoid expensive calls
+except Exception:
+    _package_map = None
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -52,35 +55,50 @@ DIFFUSERS_SLOW_IMPORT = DIFFUSERS_SLOW_IMPORT in ENV_VARS_TRUE_VALUES
 
 STR_OPERATION_TO_FUNC = {">": op.gt, ">=": op.ge, "==": op.eq, "!=": op.ne, "<=": op.le, "<": op.lt}
 
-_torch_version = "N/A"
-if USE_TORCH in ENV_VARS_TRUE_AND_AUTO_VALUES and USE_TF not in ENV_VARS_TRUE_VALUES:
-    _torch_available = importlib.util.find_spec("torch") is not None
-    if _torch_available:
+_is_google_colab = "google.colab" in sys.modules or any(k.startswith("COLAB_") for k in os.environ)
+
+
+def _is_package_available(pkg_name: str, get_dist_name: bool = False) -> Tuple[bool, str]:
+    global _package_map
+    pkg_exists = importlib.util.find_spec(pkg_name) is not None
+    pkg_version = "N/A"
+
+    if pkg_exists:
+        if _package_map is None:
+            _package_map = defaultdict(list)
+            try:
+                # Fallback for Python < 3.10
+                for dist in importlib_metadata.distributions():
+                    _top_level_declared = (dist.read_text("top_level.txt") or "").split()
+                    _infered_opt_names = {
+                        f.parts[0] if len(f.parts) > 1 else inspect.getmodulename(f) for f in (dist.files or [])
+                    } - {None}
+                    _top_level_inferred = filter(lambda name: "." not in name, _infered_opt_names)
+                    for pkg in _top_level_declared or _top_level_inferred:
+                        _package_map[pkg].append(dist.metadata["Name"])
+            except Exception as _:
+                pass
         try:
-            _torch_version = importlib_metadata.version("torch")
-            logger.info(f"PyTorch version {_torch_version} available.")
-        except importlib_metadata.PackageNotFoundError:
-            _torch_available = False
+            if get_dist_name and pkg_name in _package_map and _package_map[pkg_name]:
+                if len(_package_map[pkg_name]) > 1:
+                    logger.warning(
+                        f"Multiple distributions found for package {pkg_name}. Picked distribution: {_package_map[pkg_name][0]}"
+                    )
+                pkg_name = _package_map[pkg_name][0]
+            pkg_version = importlib_metadata.version(pkg_name)
+            logger.debug(f"Successfully imported {pkg_name} version {pkg_version}")
+        except (ImportError, importlib_metadata.PackageNotFoundError):
+            pkg_exists = False
+
+    return pkg_exists, pkg_version
+
+
+if USE_TORCH in ENV_VARS_TRUE_AND_AUTO_VALUES and USE_TF not in ENV_VARS_TRUE_VALUES:
+    _torch_available, _torch_version = _is_package_available("torch")
+
 else:
     logger.info("Disabling PyTorch because USE_TORCH is set")
     _torch_available = False
-
-_torch_xla_available = importlib.util.find_spec("torch_xla") is not None
-if _torch_xla_available:
-    try:
-        _torch_xla_version = importlib_metadata.version("torch_xla")
-        logger.info(f"PyTorch XLA version {_torch_xla_version} available.")
-    except ImportError:
-        _torch_xla_available = False
-
-# check whether torch_npu is available
-_torch_npu_available = importlib.util.find_spec("torch_npu") is not None
-if _torch_npu_available:
-    try:
-        _torch_npu_version = importlib_metadata.version("torch_npu")
-        logger.info(f"torch_npu version {_torch_npu_version} available.")
-    except ImportError:
-        _torch_npu_available = False
 
 _jax_version = "N/A"
 _flax_version = "N/A"
@@ -97,56 +115,31 @@ else:
     _flax_available = False
 
 if USE_SAFETENSORS in ENV_VARS_TRUE_AND_AUTO_VALUES:
-    _safetensors_available = importlib.util.find_spec("safetensors") is not None
-    if _safetensors_available:
-        try:
-            _safetensors_version = importlib_metadata.version("safetensors")
-            logger.info(f"Safetensors version {_safetensors_version} available.")
-        except importlib_metadata.PackageNotFoundError:
-            _safetensors_available = False
+    _safetensors_available, _safetensors_version = _is_package_available("safetensors")
+
 else:
     logger.info("Disabling Safetensors because USE_TF is set")
     _safetensors_available = False
-
-_transformers_available = importlib.util.find_spec("transformers") is not None
-try:
-    _transformers_version = importlib_metadata.version("transformers")
-    logger.debug(f"Successfully imported transformers version {_transformers_version}")
-except importlib_metadata.PackageNotFoundError:
-    _transformers_available = False
-
-
-_inflect_available = importlib.util.find_spec("inflect") is not None
-try:
-    _inflect_version = importlib_metadata.version("inflect")
-    logger.debug(f"Successfully imported inflect version {_inflect_version}")
-except importlib_metadata.PackageNotFoundError:
-    _inflect_available = False
-
-
-_unidecode_available = importlib.util.find_spec("unidecode") is not None
-try:
-    _unidecode_version = importlib_metadata.version("unidecode")
-    logger.debug(f"Successfully imported unidecode version {_unidecode_version}")
-except importlib_metadata.PackageNotFoundError:
-    _unidecode_available = False
-
 
 _onnxruntime_version = "N/A"
 _onnx_available = importlib.util.find_spec("onnxruntime") is not None
 if _onnx_available:
     candidates = (
         "onnxruntime",
+        "onnxruntime-cann",
+        "onnxruntime-directml",
+        "ort_nightly_directml",
         "onnxruntime-gpu",
         "ort_nightly_gpu",
-        "onnxruntime-directml",
+        "onnxruntime-migraphx",
         "onnxruntime-openvino",
-        "ort_nightly_directml",
+        "onnxruntime-qnn",
         "onnxruntime-rocm",
         "onnxruntime-training",
+        "onnxruntime-vitisai",
     )
     _onnxruntime_version = None
-    # For the metadata, we have to look for both onnxruntime and onnxruntime-gpu
+    # For the metadata, we have to look for both onnxruntime and onnxruntime-x
     for pkg in candidates:
         try:
             _onnxruntime_version = importlib_metadata.version(pkg)
@@ -179,85 +172,6 @@ try:
 except importlib_metadata.PackageNotFoundError:
     _opencv_available = False
 
-_scipy_available = importlib.util.find_spec("scipy") is not None
-try:
-    _scipy_version = importlib_metadata.version("scipy")
-    logger.debug(f"Successfully imported scipy version {_scipy_version}")
-except importlib_metadata.PackageNotFoundError:
-    _scipy_available = False
-
-_librosa_available = importlib.util.find_spec("librosa") is not None
-try:
-    _librosa_version = importlib_metadata.version("librosa")
-    logger.debug(f"Successfully imported librosa version {_librosa_version}")
-except importlib_metadata.PackageNotFoundError:
-    _librosa_available = False
-
-_accelerate_available = importlib.util.find_spec("accelerate") is not None
-try:
-    _accelerate_version = importlib_metadata.version("accelerate")
-    logger.debug(f"Successfully imported accelerate version {_accelerate_version}")
-except importlib_metadata.PackageNotFoundError:
-    _accelerate_available = False
-
-_xformers_available = importlib.util.find_spec("xformers") is not None
-try:
-    _xformers_version = importlib_metadata.version("xformers")
-    if _torch_available:
-        _torch_version = importlib_metadata.version("torch")
-        if version.Version(_torch_version) < version.Version("1.12"):
-            raise ValueError("xformers is installed in your environment and requires PyTorch >= 1.12")
-
-    logger.debug(f"Successfully imported xformers version {_xformers_version}")
-except importlib_metadata.PackageNotFoundError:
-    _xformers_available = False
-
-_k_diffusion_available = importlib.util.find_spec("k_diffusion") is not None
-try:
-    _k_diffusion_version = importlib_metadata.version("k_diffusion")
-    logger.debug(f"Successfully imported k-diffusion version {_k_diffusion_version}")
-except importlib_metadata.PackageNotFoundError:
-    _k_diffusion_available = False
-
-_note_seq_available = importlib.util.find_spec("note_seq") is not None
-try:
-    _note_seq_version = importlib_metadata.version("note_seq")
-    logger.debug(f"Successfully imported note-seq version {_note_seq_version}")
-except importlib_metadata.PackageNotFoundError:
-    _note_seq_available = False
-
-_wandb_available = importlib.util.find_spec("wandb") is not None
-try:
-    _wandb_version = importlib_metadata.version("wandb")
-    logger.debug(f"Successfully imported wandb version {_wandb_version }")
-except importlib_metadata.PackageNotFoundError:
-    _wandb_available = False
-
-
-_tensorboard_available = importlib.util.find_spec("tensorboard")
-try:
-    _tensorboard_version = importlib_metadata.version("tensorboard")
-    logger.debug(f"Successfully imported tensorboard version {_tensorboard_version}")
-except importlib_metadata.PackageNotFoundError:
-    _tensorboard_available = False
-
-
-_compel_available = importlib.util.find_spec("compel")
-try:
-    _compel_version = importlib_metadata.version("compel")
-    logger.debug(f"Successfully imported compel version {_compel_version}")
-except importlib_metadata.PackageNotFoundError:
-    _compel_available = False
-
-
-_ftfy_available = importlib.util.find_spec("ftfy") is not None
-try:
-    _ftfy_version = importlib_metadata.version("ftfy")
-    logger.debug(f"Successfully imported ftfy version {_ftfy_version}")
-except importlib_metadata.PackageNotFoundError:
-    _ftfy_available = False
-
-
 _bs4_available = importlib.util.find_spec("bs4") is not None
 try:
     # importlib metadata under different name
@@ -266,13 +180,6 @@ try:
 except importlib_metadata.PackageNotFoundError:
     _bs4_available = False
 
-_torchsde_available = importlib.util.find_spec("torchsde") is not None
-try:
-    _torchsde_version = importlib_metadata.version("torchsde")
-    logger.debug(f"Successfully imported torchsde version {_torchsde_version}")
-except importlib_metadata.PackageNotFoundError:
-    _torchsde_available = False
-
 _invisible_watermark_available = importlib.util.find_spec("imwatermark") is not None
 try:
     _invisible_watermark_version = importlib_metadata.version("invisible-watermark")
@@ -280,20 +187,38 @@ try:
 except importlib_metadata.PackageNotFoundError:
     _invisible_watermark_available = False
 
-
-_peft_available = importlib.util.find_spec("peft") is not None
-try:
-    _peft_version = importlib_metadata.version("peft")
-    logger.debug(f"Successfully imported peft version {_peft_version}")
-except importlib_metadata.PackageNotFoundError:
-    _peft_available = False
-
-_torchvision_available = importlib.util.find_spec("torchvision") is not None
-try:
-    _torchvision_version = importlib_metadata.version("torchvision")
-    logger.debug(f"Successfully imported torchvision version {_torchvision_version}")
-except importlib_metadata.PackageNotFoundError:
-    _torchvision_available = False
+_torch_xla_available, _torch_xla_version = _is_package_available("torch_xla")
+_torch_npu_available, _torch_npu_version = _is_package_available("torch_npu")
+_transformers_available, _transformers_version = _is_package_available("transformers")
+_hf_hub_available, _hf_hub_version = _is_package_available("huggingface_hub")
+_inflect_available, _inflect_version = _is_package_available("inflect")
+_unidecode_available, _unidecode_version = _is_package_available("unidecode")
+_k_diffusion_available, _k_diffusion_version = _is_package_available("k_diffusion")
+_note_seq_available, _note_seq_version = _is_package_available("note_seq")
+_wandb_available, _wandb_version = _is_package_available("wandb")
+_tensorboard_available, _tensorboard_version = _is_package_available("tensorboard")
+_compel_available, _compel_version = _is_package_available("compel")
+_sentencepiece_available, _sentencepiece_version = _is_package_available("sentencepiece")
+_torchsde_available, _torchsde_version = _is_package_available("torchsde")
+_peft_available, _peft_version = _is_package_available("peft")
+_torchvision_available, _torchvision_version = _is_package_available("torchvision")
+_matplotlib_available, _matplotlib_version = _is_package_available("matplotlib")
+_timm_available, _timm_version = _is_package_available("timm")
+_bitsandbytes_available, _bitsandbytes_version = _is_package_available("bitsandbytes")
+_imageio_available, _imageio_version = _is_package_available("imageio")
+_ftfy_available, _ftfy_version = _is_package_available("ftfy")
+_scipy_available, _scipy_version = _is_package_available("scipy")
+_librosa_available, _librosa_version = _is_package_available("librosa")
+_accelerate_available, _accelerate_version = _is_package_available("accelerate")
+_xformers_available, _xformers_version = _is_package_available("xformers")
+_gguf_available, _gguf_version = _is_package_available("gguf")
+_torchao_available, _torchao_version = _is_package_available("torchao")
+_bitsandbytes_available, _bitsandbytes_version = _is_package_available("bitsandbytes")
+_optimum_quanto_available, _optimum_quanto_version = _is_package_available("optimum", get_dist_name=True)
+_pytorch_retinaface_available, _pytorch_retinaface_version = _is_package_available("pytorch_retinaface")
+_better_profanity_available, _better_profanity_version = _is_package_available("better_profanity")
+_nltk_available, _nltk_version = _is_package_available("nltk")
+_cosmos_guardrail_available, _cosmos_guardrail_version = _is_package_available("cosmos_guardrail")
 
 
 def is_torch_available():
@@ -390,6 +315,66 @@ def is_peft_available():
 
 def is_torchvision_available():
     return _torchvision_available
+
+
+def is_matplotlib_available():
+    return _matplotlib_available
+
+
+def is_safetensors_available():
+    return _safetensors_available
+
+
+def is_bitsandbytes_available():
+    return _bitsandbytes_available
+
+
+def is_google_colab():
+    return _is_google_colab
+
+
+def is_sentencepiece_available():
+    return _sentencepiece_available
+
+
+def is_imageio_available():
+    return _imageio_available
+
+
+def is_gguf_available():
+    return _gguf_available
+
+
+def is_torchao_available():
+    return _torchao_available
+
+
+def is_optimum_quanto_available():
+    return _optimum_quanto_available
+
+
+def is_timm_available():
+    return _timm_available
+
+
+def is_pytorch_retinaface_available():
+    return _pytorch_retinaface_available
+
+
+def is_better_profanity_available():
+    return _better_profanity_available
+
+
+def is_nltk_available():
+    return _nltk_available
+
+
+def is_cosmos_guardrail_available():
+    return _cosmos_guardrail_available
+
+
+def is_hpu_available():
+    return all(importlib.util.find_spec(lib) for lib in ("habana_frameworks", "habana_frameworks.torch"))
 
 
 # docstyle-ignore
@@ -499,6 +484,62 @@ INVISIBLE_WATERMARK_IMPORT_ERROR = """
 {0} requires the invisible-watermark library but it was not found in your environment. You can install it with pip: `pip install invisible-watermark>=0.2.0`
 """
 
+# docstyle-ignore
+PEFT_IMPORT_ERROR = """
+{0} requires the peft library but it was not found in your environment. You can install it with pip: `pip install peft`
+"""
+
+# docstyle-ignore
+SAFETENSORS_IMPORT_ERROR = """
+{0} requires the safetensors library but it was not found in your environment. You can install it with pip: `pip install safetensors`
+"""
+
+# docstyle-ignore
+SENTENCEPIECE_IMPORT_ERROR = """
+{0} requires the sentencepiece library but it was not found in your environment. You can install it with pip: `pip install sentencepiece`
+"""
+
+
+# docstyle-ignore
+BITSANDBYTES_IMPORT_ERROR = """
+{0} requires the bitsandbytes library but it was not found in your environment. You can install it with pip: `pip install bitsandbytes`
+"""
+
+# docstyle-ignore
+IMAGEIO_IMPORT_ERROR = """
+{0} requires the imageio library and ffmpeg but it was not found in your environment. You can install it with pip: `pip install imageio imageio-ffmpeg`
+"""
+
+# docstyle-ignore
+GGUF_IMPORT_ERROR = """
+{0} requires the gguf library but it was not found in your environment. You can install it with pip: `pip install gguf`
+"""
+
+TORCHAO_IMPORT_ERROR = """
+{0} requires the torchao library but it was not found in your environment. You can install it with pip: `pip install
+torchao`
+"""
+
+QUANTO_IMPORT_ERROR = """
+{0} requires the optimum-quanto library but it was not found in your environment. You can install it with pip: `pip
+install optimum-quanto`
+"""
+
+# docstyle-ignore
+PYTORCH_RETINAFACE_IMPORT_ERROR = """
+{0} requires the pytorch_retinaface library but it was not found in your environment. You can install it with pip: `pip install pytorch_retinaface`
+"""
+
+# docstyle-ignore
+BETTER_PROFANITY_IMPORT_ERROR = """
+{0} requires the better_profanity library but it was not found in your environment. You can install it with pip: `pip install better_profanity`
+"""
+
+# docstyle-ignore
+NLTK_IMPORT_ERROR = """
+{0} requires the nltk library but it was not found in your environment. You can install it with pip: `pip install nltk`
+"""
+
 
 BACKENDS_MAPPING = OrderedDict(
     [
@@ -520,6 +561,17 @@ BACKENDS_MAPPING = OrderedDict(
         ("ftfy", (is_ftfy_available, FTFY_IMPORT_ERROR)),
         ("torchsde", (is_torchsde_available, TORCHSDE_IMPORT_ERROR)),
         ("invisible_watermark", (is_invisible_watermark_available, INVISIBLE_WATERMARK_IMPORT_ERROR)),
+        ("peft", (is_peft_available, PEFT_IMPORT_ERROR)),
+        ("safetensors", (is_safetensors_available, SAFETENSORS_IMPORT_ERROR)),
+        ("bitsandbytes", (is_bitsandbytes_available, BITSANDBYTES_IMPORT_ERROR)),
+        ("sentencepiece", (is_sentencepiece_available, SENTENCEPIECE_IMPORT_ERROR)),
+        ("imageio", (is_imageio_available, IMAGEIO_IMPORT_ERROR)),
+        ("gguf", (is_gguf_available, GGUF_IMPORT_ERROR)),
+        ("torchao", (is_torchao_available, TORCHAO_IMPORT_ERROR)),
+        ("quanto", (is_optimum_quanto_available, QUANTO_IMPORT_ERROR)),
+        ("pytorch_retinaface", (is_pytorch_retinaface_available, PYTORCH_RETINAFACE_IMPORT_ERROR)),
+        ("better_profanity", (is_better_profanity_available, BETTER_PROFANITY_IMPORT_ERROR)),
+        ("nltk", (is_nltk_available, NLTK_IMPORT_ERROR)),
     ]
 )
 
@@ -570,8 +622,9 @@ class DummyObject(type):
 # This function was copied from: https://github.com/huggingface/accelerate/blob/874c4967d94badd24f893064cc3bef45f57cadf7/src/accelerate/utils/versions.py#L319
 def compare_versions(library_or_version: Union[str, Version], operation: str, requirement_version: str):
     """
-    Args:
     Compares a library version to some requirement using a given operation.
+
+    Args:
         library_or_version (`str` or `packaging.version.Version`):
             A library name or a version to check.
         operation (`str`):
@@ -590,8 +643,9 @@ def compare_versions(library_or_version: Union[str, Version], operation: str, re
 # This function was copied from: https://github.com/huggingface/accelerate/blob/874c4967d94badd24f893064cc3bef45f57cadf7/src/accelerate/utils/versions.py#L338
 def is_torch_version(operation: str, version: str):
     """
-    Args:
     Compares the current PyTorch version to a given reference with an operation.
+
+    Args:
         operation (`str`):
             A string representation of an operator, such as `">"` or `"<="`
         version (`str`):
@@ -600,10 +654,26 @@ def is_torch_version(operation: str, version: str):
     return compare_versions(parse(_torch_version), operation, version)
 
 
+def is_torch_xla_version(operation: str, version: str):
+    """
+    Compares the current torch_xla version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A string version of torch_xla
+    """
+    if not is_torch_xla_available:
+        return False
+    return compare_versions(parse(_torch_xla_version), operation, version)
+
+
 def is_transformers_version(operation: str, version: str):
     """
-    Args:
     Compares the current Transformers version to a given reference with an operation.
+
+    Args:
         operation (`str`):
             A string representation of an operator, such as `">"` or `"<="`
         version (`str`):
@@ -614,10 +684,26 @@ def is_transformers_version(operation: str, version: str):
     return compare_versions(parse(_transformers_version), operation, version)
 
 
+def is_hf_hub_version(operation: str, version: str):
+    """
+    Compares the current Hugging Face Hub version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _hf_hub_available:
+        return False
+    return compare_versions(parse(_hf_hub_version), operation, version)
+
+
 def is_accelerate_version(operation: str, version: str):
     """
-    Args:
     Compares the current Accelerate version to a given reference with an operation.
+
+    Args:
         operation (`str`):
             A string representation of an operator, such as `">"` or `"<="`
         version (`str`):
@@ -628,10 +714,70 @@ def is_accelerate_version(operation: str, version: str):
     return compare_versions(parse(_accelerate_version), operation, version)
 
 
-def is_k_diffusion_version(operation: str, version: str):
+def is_peft_version(operation: str, version: str):
+    """
+    Compares the current PEFT version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _peft_available:
+        return False
+    return compare_versions(parse(_peft_version), operation, version)
+
+
+def is_bitsandbytes_version(operation: str, version: str):
     """
     Args:
+    Compares the current bitsandbytes version to a given reference with an operation.
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _bitsandbytes_available:
+        return False
+    return compare_versions(parse(_bitsandbytes_version), operation, version)
+
+
+def is_gguf_version(operation: str, version: str):
+    """
+    Compares the current Accelerate version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _gguf_available:
+        return False
+    return compare_versions(parse(_gguf_version), operation, version)
+
+
+def is_torchao_version(operation: str, version: str):
+    """
+    Compares the current torchao version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _torchao_available:
+        return False
+    return compare_versions(parse(_torchao_version), operation, version)
+
+
+def is_k_diffusion_version(operation: str, version: str):
+    """
     Compares the current k-diffusion version to a given reference with an operation.
+
+    Args:
         operation (`str`):
             A string representation of an operator, such as `">"` or `"<="`
         version (`str`):
@@ -642,10 +788,26 @@ def is_k_diffusion_version(operation: str, version: str):
     return compare_versions(parse(_k_diffusion_version), operation, version)
 
 
+def is_optimum_quanto_version(operation: str, version: str):
+    """
+    Compares the current Accelerate version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _optimum_quanto_available:
+        return False
+    return compare_versions(parse(_optimum_quanto_version), operation, version)
+
+
 def get_objects_from_module(module):
     """
-    Args:
     Returns a dict of object names and values in a module, while skipping private/internal objects
+
+    Args:
         module (ModuleType):
             Module to extract the objects from.
 
@@ -663,7 +825,9 @@ def get_objects_from_module(module):
 
 
 class OptionalDependencyNotAvailable(BaseException):
-    """An error indicating that an optional dependency of Diffusers was not found in the environment."""
+    """
+    An error indicating that an optional dependency of Diffusers was not found in the environment.
+    """
 
 
 class _LazyModule(ModuleType):

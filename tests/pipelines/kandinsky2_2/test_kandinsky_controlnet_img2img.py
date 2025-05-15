@@ -29,16 +29,18 @@ from diffusers import (
     VQModel,
 )
 from diffusers.utils.testing_utils import (
+    backend_empty_cache,
     enable_full_determinism,
     floats_tensor,
     load_image,
     load_numpy,
     nightly,
-    require_torch_gpu,
+    numpy_cosine_similarity_distance,
+    require_torch_accelerator,
     torch_device,
 )
 
-from ..test_pipelines_common import PipelineTesterMixin, assert_mean_pixel_difference
+from ..test_pipelines_common import PipelineTesterMixin
 
 
 enable_full_determinism()
@@ -218,12 +220,12 @@ class KandinskyV22ControlnetImg2ImgPipelineFastTests(PipelineTesterMixin, unitte
         expected_slice = np.array(
             [0.54985034, 0.55509365, 0.52561504, 0.5570494, 0.5593818, 0.5263979, 0.50285643, 0.5069846, 0.51196736]
         )
-        assert (
-            np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
-        assert (
-            np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2
-        ), f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_slice.flatten()}"
+        )
+        assert np.abs(image_from_tuple_slice.flatten() - expected_slice).max() < 1e-2, (
+            f" expected_slice {expected_slice}, but got {image_from_tuple_slice.flatten()}"
+        )
 
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(expected_max_diff=1.75e-3)
@@ -233,13 +235,19 @@ class KandinskyV22ControlnetImg2ImgPipelineFastTests(PipelineTesterMixin, unitte
 
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class KandinskyV22ControlnetImg2ImgPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_kandinsky_controlnet_img2img(self):
         expected_image = load_numpy(
@@ -248,7 +256,7 @@ class KandinskyV22ControlnetImg2ImgPipelineIntegrationTests(unittest.TestCase):
         )
 
         init_image = load_image(
-            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main" "/kandinsky/cat.png"
+            "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/kandinsky/cat.png"
         )
         init_image = init_image.resize((512, 512))
 
@@ -264,12 +272,12 @@ class KandinskyV22ControlnetImg2ImgPipelineIntegrationTests(unittest.TestCase):
         pipe_prior = KandinskyV22PriorEmb2EmbPipeline.from_pretrained(
             "kandinsky-community/kandinsky-2-2-prior", torch_dtype=torch.float16
         )
-        pipe_prior.to(torch_device)
+        pipe_prior.enable_model_cpu_offload()
 
         pipeline = KandinskyV22ControlnetImg2ImgPipeline.from_pretrained(
             "kandinsky-community/kandinsky-2-2-controlnet-depth", torch_dtype=torch.float16
         )
-        pipeline = pipeline.to(torch_device)
+        pipeline.enable_model_cpu_offload()
 
         pipeline.set_progress_bar_config(disable=None)
 
@@ -281,15 +289,17 @@ class KandinskyV22ControlnetImg2ImgPipelineIntegrationTests(unittest.TestCase):
             strength=0.85,
             generator=generator,
             negative_prompt="",
+            num_inference_steps=5,
         ).to_tuple()
 
+        generator = torch.Generator(device="cpu").manual_seed(0)
         output = pipeline(
             image=init_image,
             image_embeds=image_emb,
             negative_image_embeds=zero_image_emb,
             hint=hint,
             generator=generator,
-            num_inference_steps=100,
+            num_inference_steps=5,
             height=512,
             width=512,
             strength=0.5,
@@ -300,4 +310,5 @@ class KandinskyV22ControlnetImg2ImgPipelineIntegrationTests(unittest.TestCase):
 
         assert image.shape == (512, 512, 3)
 
-        assert_mean_pixel_difference(image, expected_image)
+        max_diff = numpy_cosine_similarity_distance(expected_image.flatten(), image.flatten())
+        assert max_diff < 5e-4

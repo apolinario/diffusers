@@ -34,7 +34,7 @@ However, if you want to explicitly enable it, you can set a [`DiffusionPipeline`
   from diffusers import DiffusionPipeline
 + from diffusers.models.attention_processor import AttnProcessor2_0
 
-  pipe = DiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
+  pipe = DiffusionPipeline.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
 + pipe.unet.set_attn_processor(AttnProcessor2_0())
 
   prompt = "a photo of an astronaut riding a horse on mars"
@@ -49,7 +49,7 @@ In some cases - such as making the pipeline more deterministic or converting it 
   import torch
   from diffusers import DiffusionPipeline
 
-  pipe = DiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
+  pipe = DiffusionPipeline.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
 + pipe.unet.set_default_attn_processor()
 
   prompt = "a photo of an astronaut riding a horse on mars"
@@ -64,7 +64,7 @@ The `torch.compile` function can often provide an additional speed-up to your Py
 from diffusers import DiffusionPipeline
 import torch
 
-pipe = DiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
+pipe = DiffusionPipeline.from_pretrained("stable-diffusion-v1-5/stable-diffusion-v1-5", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
 pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
 images = pipe(prompt, num_inference_steps=steps, num_images_per_prompt=batch_size).images[0]
 ```
@@ -77,6 +77,23 @@ For more information and different options about `torch.compile`, refer to the [
 
 > [!TIP]
 > Learn more about other ways PyTorch 2.0 can help optimize your model in the [Accelerate inference of text-to-image diffusion models](../tutorials/fast_diffusion) tutorial.
+
+### Regional compilation
+
+Compiling the whole model usually has a big problem space for optimization. Models are often composed of multiple repeated blocks. [Regional compilation](https://pytorch.org/tutorials/recipes/regional_compilation.html) compiles the repeated block first (a transformer encoder block, for example), so that the Torch compiler would re-use its cached/optimized generated code for the other blocks, reducing (often massively) the cold start compilation time observed on the first inference call.
+
+Enabling regional compilation might require simple yet intrusive changes to the
+modeling code. However, 🤗 Accelerate provides a utility [`compile_regions()`](https://huggingface.co/docs/accelerate/main/en/usage_guides/compilation#how-to-use-regional-compilation) which automatically compiles
+the repeated blocks of the provided `nn.Module` sequentially, and the rest of the model separately. This helps with reducing cold start time while keeping most (if not all) of the speedup you would get from full compilation.
+
+```py
+# Make sure you're on the latest `accelerate`: `pip install -U accelerate`.
+from accelerate.utils import compile_regions
+
+pipe.unet = compile_regions(pipe.unet, mode="reduce-overhead", fullgraph=True)
+```
+
+As you may have noticed `compile_regions()` takes the same arguments as `torch.compile()`, allowing flexibility.
 
 ## Benchmark
 
@@ -92,7 +109,7 @@ Expand the dropdown below to find the code used to benchmark each pipeline:
 from diffusers import DiffusionPipeline
 import torch
 
-path = "runwayml/stable-diffusion-v1-5"
+path = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 run_compile = True  # Set True / False
 
@@ -122,7 +139,7 @@ url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/st
 init_image = load_image(url)
 init_image = init_image.resize((512, 512))
 
-path = "runwayml/stable-diffusion-v1-5"
+path = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 run_compile = True  # Set True / False
 
@@ -183,7 +200,7 @@ url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/st
 init_image = load_image(url)
 init_image = init_image.resize((512, 512))
 
-path = "runwayml/stable-diffusion-v1-5"
+path = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 run_compile = True  # Set True / False
 controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny", torch_dtype=torch.float16, use_safetensors=True)

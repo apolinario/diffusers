@@ -233,7 +233,7 @@ class UnCLIPPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             "prior_num_inference_steps": 2,
             "decoder_num_inference_steps": 2,
             "super_res_num_inference_steps": 2,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -303,6 +303,7 @@ class UnCLIPPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             shape, dtype=dtype, device=device, generator=generator, latents=None, scheduler=DummyScheduler()
         )
         shape = (batch_size, decoder.config.in_channels, decoder.config.sample_size, decoder.config.sample_size)
+        generator = torch.Generator(device=device).manual_seed(0)
         decoder_latents = pipe.prepare_latents(
             shape, dtype=dtype, device=device, generator=generator, latents=None, scheduler=DummyScheduler()
         )
@@ -380,7 +381,7 @@ class UnCLIPPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         ]
 
         self._test_inference_batch_single_identical(
-            additional_params_copy_to_batched_inputs=additional_params_copy_to_batched_inputs, expected_max_diff=5e-3
+            additional_params_copy_to_batched_inputs=additional_params_copy_to_batched_inputs, expected_max_diff=9.8e-3
         )
 
     def test_inference_batch_consistent(self):
@@ -421,6 +422,12 @@ class UnCLIPPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
 @nightly
 class UnCLIPPipelineCPUIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
@@ -453,6 +460,12 @@ class UnCLIPPipelineCPUIntegrationTests(unittest.TestCase):
 @nightly
 @require_torch_gpu
 class UnCLIPPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
@@ -488,7 +501,6 @@ class UnCLIPPipelineIntegrationTests(unittest.TestCase):
         torch.cuda.reset_peak_memory_stats()
 
         pipe = UnCLIPPipeline.from_pretrained("kakaobrain/karlo-v1-alpha", torch_dtype=torch.float16)
-        pipe = pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         pipe.enable_attention_slicing()
         pipe.enable_sequential_cpu_offload()

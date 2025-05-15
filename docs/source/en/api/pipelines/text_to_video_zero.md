@@ -12,6 +12,10 @@ specific language governing permissions and limitations under the License.
 
 # Text2Video-Zero
 
+<div class="flex flex-wrap space-x-1">
+  <img alt="LoRA" src="https://img.shields.io/badge/LoRA-d8b4fe?style=flat"/>
+</div>
+
 [Text2Video-Zero: Text-to-Image Diffusion Models are Zero-Shot Video Generators](https://huggingface.co/papers/2303.13439) is by Levon Khachatryan, Andranik Movsisyan, Vahram Tadevosyan, Roberto Henschel, [Zhangyang Wang](https://www.ece.utexas.edu/people/faculty/atlas-wang), Shant Navasardyan, [Humphrey Shi](https://www.humphreyshi.com).
 
 Text2Video-Zero enables zero-shot video generation using either:
@@ -40,8 +44,9 @@ To generate a video from prompt, run the following Python code:
 ```python
 import torch
 from diffusers import TextToVideoZeroPipeline
+import imageio
 
-model_id = "runwayml/stable-diffusion-v1-5"
+model_id = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 pipe = TextToVideoZeroPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to("cuda")
 
 prompt = "A panda is playing guitar on times square"
@@ -63,7 +68,7 @@ import torch
 from diffusers import TextToVideoZeroPipeline
 import numpy as np
 
-model_id = "runwayml/stable-diffusion-v1-5"
+model_id = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 pipe = TextToVideoZeroPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to("cuda")
 seed = 0
 video_length = 24  #24 ÷ 4fps = 6 seconds
@@ -137,7 +142,7 @@ To generate a video from prompt with additional pose control
     from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
     from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_zero import CrossFrameAttnProcessor
 
-    model_id = "runwayml/stable-diffusion-v1-5"
+    model_id = "stable-diffusion-v1-5/stable-diffusion-v1-5"
     controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-openpose", torch_dtype=torch.float16)
     pipe = StableDiffusionControlNetPipeline.from_pretrained(
         model_id, controlnet=controlnet, torch_dtype=torch.float16
@@ -155,28 +160,28 @@ To generate a video from prompt with additional pose control
     imageio.mimsave("video.mp4", result, fps=4)
     ```
 - #### SDXL Support
-	
+
 	Since our attention processor also works with SDXL, it can be utilized to generate a video from prompt using ControlNet models powered by SDXL:
 	```python
 	import torch
 	from diffusers import StableDiffusionXLControlNetPipeline, ControlNetModel
 	from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_zero import CrossFrameAttnProcessor
-	
+
 	controlnet_model_id = 'thibaud/controlnet-openpose-sdxl-1.0'
 	model_id = 'stabilityai/stable-diffusion-xl-base-1.0'
-	
+
 	controlnet = ControlNetModel.from_pretrained(controlnet_model_id, torch_dtype=torch.float16)
 	pipe = StableDiffusionControlNetPipeline.from_pretrained(
 		model_id, controlnet=controlnet, torch_dtype=torch.float16
 	).to('cuda')
-	
+
 	# Set the attention processor
 	pipe.unet.set_attn_processor(CrossFrameAttnProcessor(batch_size=2))
 	pipe.controlnet.set_attn_processor(CrossFrameAttnProcessor(batch_size=2))
-	
+
 	# fix latents for all frames
 	latents = torch.randn((1, 4, 128, 128), device="cuda", dtype=torch.float16).repeat(len(pose_images), 1, 1, 1)
-	
+
 	prompt = "Darth Vader dancing in a desert"
 	result = pipe(prompt=[prompt] * len(pose_images), image=pose_images, latents=latents).images
 	imageio.mimsave("video.mp4", result, fps=4)
@@ -283,7 +288,7 @@ You can filter out some available DreamBooth-trained models with [this link](htt
 
 <Tip>
 
-Make sure to check out the Schedulers [guide](../../using-diffusers/schedulers) to learn how to explore the tradeoff between scheduler speed and quality, and see the [reuse components across pipelines](../../using-diffusers/loading#reuse-components-across-pipelines) section to learn how to efficiently load the same components into multiple pipelines.
+Make sure to check out the Schedulers [guide](../../using-diffusers/schedulers) to learn how to explore the tradeoff between scheduler speed and quality, and see the [reuse components across pipelines](../../using-diffusers/loading#reuse-a-pipeline) section to learn how to efficiently load the same components into multiple pipelines.
 
 </Tip>
 

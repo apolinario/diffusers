@@ -30,9 +30,16 @@ from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from diffusers.pipelines.controlnet.pipeline_controlnet_img2img import StableDiffusionControlNetImg2ImgPipeline
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.schedulers import KarrasDiffusionSchedulers
-from diffusers.utils import BaseOutput, deprecate, logging
+from diffusers.utils import BaseOutput, deprecate, is_torch_xla_available, logging
 from diffusers.utils.torch_utils import is_compiled_module, randn_tensor
 
+
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -142,12 +149,12 @@ class TextToVideoSDPipelineOutput(BaseOutput):
     Output class for text-to-video pipelines.
 
     Args:
-        frames (`List[np.ndarray]` or `torch.FloatTensor`)
+        frames (`List[np.ndarray]` or `torch.Tensor`)
             List of denoised frames (essentially images) as NumPy arrays of shape `(height, width, num_channels)` or as
             a `torch` tensor. The length of the list denotes the video length (the number of frames).
     """
 
-    frames: Union[List[np.ndarray], torch.FloatTensor]
+    frames: Union[List[np.ndarray], torch.Tensor]
 
 
 @torch.no_grad()
@@ -345,7 +352,7 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.control_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
@@ -589,20 +596,20 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
-        frames: Union[List[np.ndarray], torch.FloatTensor] = None,
-        control_frames: Union[List[np.ndarray], torch.FloatTensor] = None,
+        frames: Union[List[np.ndarray], torch.Tensor] = None,
+        control_frames: Union[List[np.ndarray], torch.Tensor] = None,
         strength: float = 0.8,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_conditioning_scale: Union[float, List[float]] = 0.8,
@@ -624,8 +631,8 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
-            frames (`List[np.ndarray]` or `torch.FloatTensor`): The input images to be used as the starting point for the image generation process.
-            control_frames (`List[np.ndarray]` or `torch.FloatTensor`): The ControlNet input images condition to provide guidance to the `unet` for generation.
+            frames (`List[np.ndarray]` or `torch.Tensor`): The input images to be used as the starting point for the image generation process.
+            control_frames (`List[np.ndarray]` or `torch.Tensor` or `Callable`): The ControlNet input images condition to provide guidance to the `unet` for generation or any callable object to convert frame to control_frame.
             strength ('float'): SDEdit strength.
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
@@ -646,14 +653,14 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
+            prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
@@ -665,7 +672,7 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
                 plain tuple.
             callback (`Callable`, *optional*):
                 A function that will be called every `callback_steps` steps during inference. The function will be
-                called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                called with the following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function will be called. If not specified, the callback will be
                 called at every step.
@@ -775,14 +782,14 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
         self.attn_state.reset()
 
         # 4.1 prepare frames
-        image = self.image_processor.preprocess(frames[0]).to(dtype=torch.float32)
+        image = self.image_processor.preprocess(frames[0]).to(dtype=self.dtype)
         first_image = image[0]  # C, H, W
 
         # 4.2 Prepare controlnet_conditioning_image
         # Currently we only support single control
         if isinstance(controlnet, ControlNetModel):
             control_image = self.prepare_control_image(
-                image=control_frames[0],
+                image=control_frames(frames[0]) if callable(control_frames) else control_frames[0],
                 width=width,
                 height=height,
                 batch_size=batch_size,
@@ -864,7 +871,7 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
                 )
 
                 if guess_mode and do_classifier_free_guidance:
-                    # Infered ControlNet only for the conditional batch.
+                    # Inferred ControlNet only for the conditional batch.
                     # To apply the output of ControlNet to both the unconditional and conditional batches,
                     # add 0 to the unconditional batch to keep it unchanged.
                     down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
@@ -901,6 +908,9 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
 
+                if XLA_AVAILABLE:
+                    xm.mark_step()
+
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
         else:
@@ -917,10 +927,10 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
         for idx in range(1, len(frames)):
             image = frames[idx]
             prev_image = frames[idx - 1]
-            control_image = control_frames[idx]
+            control_image = control_frames(image) if callable(control_frames) else control_frames[idx]
             # 5.1 prepare frames
-            image = self.image_processor.preprocess(image).to(dtype=torch.float32)
-            prev_image = self.image_processor.preprocess(prev_image).to(dtype=torch.float32)
+            image = self.image_processor.preprocess(image).to(dtype=self.dtype)
+            prev_image = self.image_processor.preprocess(prev_image).to(dtype=self.dtype)
 
             warped_0, bwd_occ_0, bwd_flow_0 = get_warped_and_mask(
                 self.flow_model, first_image, image[0], first_result, False, self.device
@@ -1038,7 +1048,7 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
                         )
 
                         if guess_mode and do_classifier_free_guidance:
-                            # Infered ControlNet only for the conditional batch.
+                            # Inferred ControlNet only for the conditional batch.
                             # To apply the output of ControlNet to both the unconditional and conditional batches,
                             # add 0 to the unconditional batch to keep it unchanged.
                             down_block_res_samples = [
@@ -1099,6 +1109,9 @@ class RerenderAVideoPipeline(StableDiffusionControlNetImg2ImgPipeline):
                             progress_bar.update()
                             if callback is not None and i % callback_steps == 0:
                                 callback(i, t, latents)
+
+                        if XLA_AVAILABLE:
+                            xm.mark_step()
 
                     return latents
 

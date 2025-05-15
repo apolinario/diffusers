@@ -21,7 +21,13 @@ from transformers import CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokeni
 
 from diffusers import HeunDiscreteScheduler, PriorTransformer, ShapEPipeline
 from diffusers.pipelines.shap_e import ShapERenderer
-from diffusers.utils.testing_utils import load_numpy, nightly, require_torch_gpu, torch_device
+from diffusers.utils.testing_utils import (
+    backend_empty_cache,
+    load_numpy,
+    nightly,
+    require_torch_accelerator,
+    torch_device,
+)
 
 from ..test_pipelines_common import PipelineTesterMixin, assert_mean_pixel_difference
 
@@ -181,7 +187,7 @@ class ShapEPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
         assert image.shape == (32, 16)
 
-        expected_slice = np.array([-1.0000, -0.6241, 1.0000, -0.8978, -0.6866, 0.7876, -0.7473, -0.2874, 0.6103])
+        expected_slice = np.array([-1.0000, -0.6559, 1.0000, -0.9096, -0.7252, 0.8211, -0.7647, -0.3308, 0.6462])
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
     def test_inference_batch_consistent(self):
@@ -222,13 +228,19 @@ class ShapEPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
 
 @nightly
-@require_torch_gpu
+@require_torch_accelerator
 class ShapEPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
         gc.collect()
-        torch.cuda.empty_cache()
+        backend_empty_cache(torch_device)
 
     def test_shap_e(self):
         expected_image = load_numpy(

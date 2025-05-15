@@ -29,7 +29,6 @@ from ...models.attention_processor import (
     AttnProcessor,
 )
 from ...models.modeling_utils import ModelMixin
-from ...utils import is_torch_version
 from .modeling_wuerstchen_common import AttnBlock, ResBlock, TimestepBlock, WuerstchenLayerNorm
 
 
@@ -40,15 +39,13 @@ class WuerstchenPrior(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, Peft
     @register_to_config
     def __init__(self, c_in=16, c=1280, c_cond=1024, c_r=64, depth=16, nhead=16, dropout=0.1):
         super().__init__()
-        conv_cls = nn.Conv2d
-        linear_cls = nn.Linear
 
         self.c_r = c_r
-        self.projection = conv_cls(c_in, c, kernel_size=1)
+        self.projection = nn.Conv2d(c_in, c, kernel_size=1)
         self.cond_mapper = nn.Sequential(
-            linear_cls(c_cond, c),
+            nn.Linear(c_cond, c),
             nn.LeakyReLU(0.2),
-            linear_cls(c, c),
+            nn.Linear(c, c),
         )
 
         self.blocks = nn.ModuleList()
@@ -58,7 +55,7 @@ class WuerstchenPrior(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, Peft
             self.blocks.append(AttnBlock(c, c, nhead, self_attn=True, dropout=dropout))
         self.out = nn.Sequential(
             WuerstchenLayerNorm(c, elementwise_affine=False, eps=1e-6),
-            conv_cls(c, c_in * 2, kernel_size=1),
+            nn.Conv2d(c, c_in * 2, kernel_size=1),
         )
 
         self.gradient_checkpointing = False
@@ -77,7 +74,7 @@ class WuerstchenPrior(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, Peft
 
         def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
-                processors[f"{name}.processor"] = module.get_processor(return_deprecated_lora=True)
+                processors[f"{name}.processor"] = module.get_processor()
 
             for sub_name, child in module.named_children():
                 fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
@@ -140,9 +137,6 @@ class WuerstchenPrior(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, Peft
 
         self.set_attn_processor(processor)
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = value
-
     def gen_r_embedding(self, r, max_positions=10000):
         r = r * max_positions
         half_dim = self.c_r // 2
@@ -160,34 +154,14 @@ class WuerstchenPrior(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin, Peft
         c_embed = self.cond_mapper(c)
         r_embed = self.gen_r_embedding(r)
 
-        if self.training and self.gradient_checkpointing:
-
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
-            if is_torch_version(">=", "1.11.0"):
-                for block in self.blocks:
-                    if isinstance(block, AttnBlock):
-                        x = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(block), x, c_embed, use_reentrant=False
-                        )
-                    elif isinstance(block, TimestepBlock):
-                        x = torch.utils.checkpoint.checkpoint(
-                            create_custom_forward(block), x, r_embed, use_reentrant=False
-                        )
-                    else:
-                        x = torch.utils.checkpoint.checkpoint(create_custom_forward(block), x, use_reentrant=False)
-            else:
-                for block in self.blocks:
-                    if isinstance(block, AttnBlock):
-                        x = torch.utils.checkpoint.checkpoint(create_custom_forward(block), x, c_embed)
-                    elif isinstance(block, TimestepBlock):
-                        x = torch.utils.checkpoint.checkpoint(create_custom_forward(block), x, r_embed)
-                    else:
-                        x = torch.utils.checkpoint.checkpoint(create_custom_forward(block), x)
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            for block in self.blocks:
+                if isinstance(block, AttnBlock):
+                    x = self._gradient_checkpointing_func(block, x, c_embed)
+                elif isinstance(block, TimestepBlock):
+                    x = self._gradient_checkpointing_func(block, x, r_embed)
+                else:
+                    x = self._gradient_checkpointing_func(block, x)
         else:
             for block in self.blocks:
                 if isinstance(block, AttnBlock):

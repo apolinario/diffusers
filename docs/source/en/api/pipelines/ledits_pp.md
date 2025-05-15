@@ -12,6 +12,10 @@ specific language governing permissions and limitations under the License.
 
 # LEDITS++
 
+<div class="flex flex-wrap space-x-1">
+  <img alt="LoRA" src="https://img.shields.io/badge/LoRA-d8b4fe?style=flat"/>
+</div>
+
 LEDITS++ was proposed in [LEDITS++: Limitless Image Editing using Text-to-Image Models](https://huggingface.co/papers/2311.16711) by Manuel Brack, Felix Friedrich, Katharina Kornmeier, Linoy Tsaban, Patrick Schramowski, Kristian Kersting, Apolinário Passos.
 
 The abstract from the paper is:
@@ -25,11 +29,11 @@ You can find additional information about LEDITS++ on the [project page](https:/
 </Tip>
 
 <Tip warning={true}>
-Due to some backward compatability issues with the current diffusers implementation of [`~schedulers.DPMSolverMultistepScheduler`] this implementation of LEdits++ can no longer guarantee perfect inversion. 
-This issue is unlikely to have any noticeable effects on applied use-cases. However, we provide an alternative implementation that guarantees perfect inversion in a dedicated [GitHub repo](https://github.com/ml-research/ledits_pp). 
+Due to some backward compatibility issues with the current diffusers implementation of [`~schedulers.DPMSolverMultistepScheduler`] this implementation of LEdits++ can no longer guarantee perfect inversion.
+This issue is unlikely to have any noticeable effects on applied use-cases. However, we provide an alternative implementation that guarantees perfect inversion in a dedicated [GitHub repo](https://github.com/ml-research/ledits_pp).
 </Tip>
 
-We provide two distinct pipelines based on different pre-trained models. 
+We provide two distinct pipelines based on different pre-trained models.
 
 ## LEditsPPPipelineStableDiffusion
 [[autodoc]] pipelines.ledits_pp.LEditsPPPipelineStableDiffusion
