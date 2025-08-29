@@ -24,6 +24,8 @@
 #     "Jinja2",
 #     "peft>=0.11.1",
 #     "sentencepiece",
+#     "bitsandbytes",
+#     "datasets"
 # ]
 # ///
 
